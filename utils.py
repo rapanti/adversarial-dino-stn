@@ -17,6 +17,7 @@ Misc functions.
 Mostly copy-paste from torchvision references or other public repos like DETR:
 https://github.com/facebookresearch/detr/blob/master/util/misc.py
 """
+import argparse
 import os
 import sys
 import time
@@ -24,13 +25,20 @@ import math
 import random
 import datetime
 import subprocess
+import warnings
 from collections import defaultdict, deque
 
 import numpy as np
+import seaborn as sns
 import torch
 from torch import nn
 import torch.distributed as dist
+from torchvision import datasets, transforms
 from PIL import ImageFilter, ImageOps
+from torchvision.transforms import InterpolationMode
+from torch.utils.tensorboard import SummaryWriter
+import matplotlib
+import matplotlib.pyplot as plt
 
 
 class GaussianBlur(object):
@@ -66,6 +74,15 @@ class Solarization(object):
             return ImageOps.solarize(img)
         else:
             return img
+
+
+def load_stn_pretrained_weights(model, pretrained_weights):
+    if os.path.isfile(pretrained_weights):
+        state_dict = torch.load(pretrained_weights, map_location="cpu")
+        # remove `module.` prefix
+        state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+        msg = model.load_state_dict(state_dict["stn"], strict=False)
+        print('STN Pretrained weights found at {} and loaded with msg: {}'.format(pretrained_weights, msg))
 
 
 def load_pretrained_weights(model, pretrained_weights, checkpoint_key, model_name, patch_size):
@@ -109,7 +126,14 @@ def load_pretrained_weights(model, pretrained_weights, checkpoint_key, model_nam
             print("There is no reference weights available for this model => We use random weights.")
 
 
-def load_pretrained_linear_weights(linear_classifier, model_name, patch_size):
+def load_pretrained_linear_weights(linear_classifier, pretrained_weights, model_name, patch_size):
+    if pretrained_weights:
+        if not os.path.isfile(pretrained_weights):
+            print('Given path of pretrained weights is not valid.')
+            sys.exit(1)
+        state_dict = torch.load(pretrained_weights, map_location="cpu")
+        linear_classifier.load_state_dict(state_dict, strict=True)
+        return
     url = None
     if model_name == "vit_small" and patch_size == 16:
         url = "dino_deitsmall16_pretrain/dino_deitsmall16_linearweights.pth"
@@ -827,3 +851,275 @@ def multi_scale(samples, model):
     v /= 3
     v /= v.norm()
     return v
+
+
+class GradientReverse(torch.autograd.Function):
+    scale = 1.0
+
+    @staticmethod
+    def forward(ctx, x):
+        #  autograd checks for changes in tensor to determine if backward should be called
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return GradientReverse.scale * grad_output.neg()
+
+
+def grad_reverse(x, scale=1.0):
+    GradientReverse.scale = scale
+    return GradientReverse.apply(x)
+
+
+class GradientRescale(torch.autograd.Function):
+    scale = 1.0
+
+    @staticmethod
+    def forward(ctx, x):
+        #  autograd checks for changes in tensor to determine if backward should be called
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return GradientRescale.scale * grad_output
+
+
+def grad_rescale(x, scale=1.0):
+    GradientRescale.scale = scale
+    return GradientRescale.apply(x)
+
+
+def build_transform(args):
+    if not args.resize_all_inputs and args.dataset == "ImageNet":
+        return transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+            ])
+    elif args.resize_all_inputs and args.dataset == "ImageNet":
+        return transforms.Compose([
+                transforms.Resize(256),
+                transforms.CenterCrop(224),
+                transforms.ToTensor(),
+                transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+            ])
+    elif args.dataset == "CIFAR10":
+        return transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+                # transforms.Normalize((0.4914, 0.4822, 0.4465), (0.247, 0.243, 0.261)),
+            ])
+    elif args.dataset == "CIFAR100":
+        return transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+            ])
+    print(f"Does not support dataset: {args.dataset}")
+    sys.exit(1)
+
+
+def build_dataset(is_train, args):
+    transform = build_transform(args)
+    if args.dataset == 'CIFAR10':
+        return datasets.CIFAR10(args.data_path, download=True, train=is_train, transform=transform)
+    if args.dataset == 'CIFAR100':
+        return datasets.CIFAR100(args.data_path, download=True, train=is_train, transform=transform)
+    elif args.dataset == 'ImageNet':
+        root = os.path.join(args.data_path, 'train' if is_train else 'val')
+        dataset = datasets.ImageFolder(root, transform=transform)
+        return dataset
+    print(f"Does not support dataset: {args.dataset}")
+    sys.exit(1)
+
+
+def print_gradients(stn, args):
+    print(stn.module.transform_net.localization_net.heads[3].linear2.weight)
+    if args.separate_localization_net:
+        print(stn.module.transform_net.localization_net.backbones[1].conv2.weight)
+    else:
+        print(stn.module.transform_net.localization_net.backbones[0].conv2.weight)
+    print("-------------------------sanity check local grads-------------------------------")
+    print(stn.module.transform_net.localization_net.heads[3].linear2.weight.grad)
+    print("-------------------------sanity check global grads-------------------------------")
+    print(stn.module.transform_net.localization_net.heads[0].linear2.weight.grad)
+    if args.separate_localization_net:
+        print(stn.module.transform_net.localization_net.backbones[1].conv2.weight.grad)
+    else:
+        print(stn.module.transform_net.localization_net.backbones[0].conv2.weight.grad)
+
+
+class ColorAugmentation(object):
+    def __init__(self, local_crops_number):
+        self.local_crops_number = local_crops_number
+        color_jitter = transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1)
+        gaussian_blur = transforms.GaussianBlur(1, (0.1, 2.0))
+        self.transform_global1 = transforms.Compose([
+            transforms.RandomApply([color_jitter], p=0.8),
+            transforms.RandomGrayscale(p=0.2),
+            transforms.RandomApply([gaussian_blur], p=1.0),
+            transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+            transforms.ConvertImageDtype(torch.float32),
+            # transforms.ToTensor(),
+        ])
+
+        self.transform_global2 = transforms.Compose([
+            transforms.RandomApply([color_jitter], p=0.8),
+            transforms.RandomGrayscale(p=0.2),
+            transforms.RandomApply([gaussian_blur], p=0.1),
+            transforms.RandomSolarize(1, p=0.2),
+            # img is already normalized as input to STN; bound = 1 if img.is_floating_point() else 255
+            transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+            transforms.ConvertImageDtype(torch.float32),
+        ])
+
+        self.transform_local = transforms.Compose([
+            transforms.RandomApply([color_jitter], p=0.8),
+            transforms.RandomGrayscale(p=0.2),
+            transforms.RandomApply([gaussian_blur], p=0.5),
+            transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+            transforms.ConvertImageDtype(torch.float32),
+        ])
+
+    def __call__(self, images):
+        crops = [self.transform_global1(images[0]), self.transform_global2(images[1])]
+        for img in images[2:]:
+            crops.append(self.transform_local(img))
+        return crops
+
+
+def image_grid(images, original_images, epoch, plot_size=16):
+    """Return a 5x5 grid of the MNIST images as a matplotlib figure."""
+    # Create a figure to contain the plot.
+    figure = plt.figure(figsize=(20, 50))
+    figure.tight_layout()
+    num_images = min(len(original_images), plot_size)
+    plt.subplots_adjust(hspace=0.5)
+
+    g1 = images[0]
+    g2 = images[1]
+    l1 = images[2]
+    l2 = images[3]
+
+    titles = [f"orig@{epoch} epoch", "global 1", "global 2", "local 1", "local 2"]
+    total = 0
+    for i in range(num_images):  # orig_img in enumerate(original_images, 1):
+        orig_img = original_images[i]
+        g1_img = g1[i]
+        g2_img = g2[i]
+        l1_img = l1[i]
+        l2_img = l2[i]
+        all_images = [orig_img, g1_img, g2_img, l1_img, l2_img]
+        for j in range(5):
+            total += 1
+
+            plt.subplot(num_images, 5, total, title=titles[j])
+            plt.xticks([])
+            plt.yticks([])
+            plt.grid(False)
+
+            img = all_images[j].cpu().detach().numpy()
+
+            if img.shape[0] == 3:
+                # CIFAR100 and ImageNet case
+                img = np.moveaxis(img, 0, -1)
+            else:
+                # MNIST case
+                img = img.squeeze()
+
+            plt.imshow(np.clip(img, 0, 1))
+
+    return figure
+
+
+def theta_heatmap(theta, epoch):
+    figure, ax = plt.subplots()
+    # figure.tight_layout()
+    sns.heatmap(theta, annot=True)
+    ax.set_title(f'Theta @ {epoch} epoch')
+    return figure
+
+
+class SummaryWriterCustom(SummaryWriter):
+    def __init__(self, log_dir, plot_size):
+        super().__init__(log_dir=log_dir)
+        self.plot_size = plot_size
+        matplotlib.use('Agg')
+
+    def write_image_grid(self, tag, images, original_images, epoch, global_step):
+        fig = image_grid(images=images, original_images=original_images, epoch=epoch, plot_size=self.plot_size)
+        self.add_figure(tag, fig, global_step=global_step)
+
+    def write_theta_heatmap(self, tag, theta, epoch, global_step):
+        fig = theta_heatmap(theta, epoch)
+        self.add_figure(tag, fig, global_step=global_step)
+
+
+def summary_writer_write_images_thetas(summary_writer, stn_images, images, thetas, epoch, it):
+    theta_g1 = thetas[0][0].cpu().detach().numpy()
+    theta_g2 = thetas[1][0].cpu().detach().numpy()
+    theta_l1 = thetas[2][0].cpu().detach().numpy()
+    theta_l2 = thetas[3][0].cpu().detach().numpy()
+    summary_writer.write_image_grid(tag="images", images=stn_images, original_images=images, epoch=epoch, global_step=it)
+    summary_writer.write_theta_heatmap(tag="theta_g1", theta=theta_g1, epoch=epoch, global_step=it)
+    summary_writer.write_theta_heatmap(tag="theta_g2", theta=theta_g2, epoch=epoch, global_step=it)
+    summary_writer.write_theta_heatmap(tag="theta_l1", theta=theta_l1, epoch=epoch, global_step=it)
+    summary_writer.write_theta_heatmap(tag="theta_l2", theta=theta_l2, epoch=epoch, global_step=it)
+
+    theta_g_euc_norm = np.linalg.norm(np.double(theta_g2 - theta_g1), 2)
+    theta_l_euc_norm = np.linalg.norm(np.double(theta_l2 - theta_l1), 2)
+    summary_writer.add_scalar(tag="theta local eucl. norm.", scalar_value=theta_l_euc_norm, global_step=it)
+    summary_writer.add_scalar(tag="theta global eucl. norm.", scalar_value=theta_g_euc_norm, global_step=it)
+
+
+"""
+###################################
+LEGACY CODE ||| SAVED FOR LATER USE
+###################################
+"""
+
+
+class DataAugmentationDINO(object):
+    def __init__(self, global_crops_scale, local_crops_scale, local_crops_number):
+        flip_and_color_jitter = transforms.Compose([
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomApply(
+                [transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1)],
+                p=0.8
+            ),
+            transforms.RandomGrayscale(p=0.2),
+        ])
+        normalize = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+        ])
+
+        # first global crop
+        self.global_transfo1 = transforms.Compose([
+            transforms.RandomResizedCrop(224, scale=global_crops_scale, interpolation=InterpolationMode.BICUBIC),
+            flip_and_color_jitter,
+            GaussianBlur(1.0),
+            normalize,
+        ])
+        # second global crop
+        self.global_transfo2 = transforms.Compose([
+            transforms.RandomResizedCrop(224, scale=global_crops_scale, interpolation=InterpolationMode.BICUBIC),
+            flip_and_color_jitter,
+            GaussianBlur(0.1),
+            Solarization(0.2),
+            normalize,
+        ])
+        # transformation for the local small crops
+        self.local_crops_number = local_crops_number
+        self.local_transfo = transforms.Compose([
+            transforms.RandomResizedCrop(96, scale=local_crops_scale, interpolation=InterpolationMode.BICUBIC),
+            flip_and_color_jitter,
+            GaussianBlur(p=0.5),
+            normalize,
+        ])
+
+    def __call__(self, image):
+        crops = []
+        crops.append(self.global_transfo1(image))
+        crops.append(self.global_transfo2(image))
+        for _ in range(self.local_crops_number):
+            crops.append(self.local_transfo(image))
+        return crops

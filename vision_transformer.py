@@ -133,14 +133,14 @@ class PatchEmbed(nn.Module):
 
 class VisionTransformer(nn.Module):
     """ Vision Transformer """
-    def __init__(self, img_size=[224], patch_size=16, in_chans=3, num_classes=0, embed_dim=768, depth=12,
+    def __init__(self, img_size=224, patch_size=16, in_chans=3, num_classes=0, embed_dim=768, depth=12,
                  num_heads=12, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop_rate=0., attn_drop_rate=0.,
                  drop_path_rate=0., norm_layer=nn.LayerNorm, **kwargs):
         super().__init__()
         self.num_features = self.embed_dim = embed_dim
 
         self.patch_embed = PatchEmbed(
-            img_size=img_size[0], patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
+            img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
         num_patches = self.patch_embed.num_patches
 
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
@@ -231,6 +231,27 @@ class VisionTransformer(nn.Module):
             if len(self.blocks) - i <= n:
                 output.append(self.norm(x))
         return output
+
+
+def vit_pico(**kwargs):  # pico
+    model = VisionTransformer(
+        embed_dim=96, depth=6, num_heads=3, mlp_ratio=4,
+        qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
+    return model
+
+
+def vit_micro(**kwargs):
+    model = VisionTransformer(
+        embed_dim=96, depth=12, num_heads=3, mlp_ratio=4,
+        qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
+    return model
+
+
+def vit_nano(**kwargs):
+    model = VisionTransformer(
+        embed_dim=192, depth=8, num_heads=3, mlp_ratio=4,
+        qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
+    return model
 
 
 def vit_tiny(patch_size=16, **kwargs):
