@@ -30,8 +30,8 @@ import utils
 import vision_transformer as vits
 
 
-def eval_linear(args):
-    utils.init_distributed_mode(args)
+def eval_linear(args, dist_inited=False):
+    utils.init_distributed_mode(args) if not dist_inited else None
     cudnn.benchmark = True
 
     print("git:\n  {}\n".format(utils.get_sha()))
