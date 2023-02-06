@@ -18,6 +18,7 @@ import datetime
 import time
 import math
 import json
+from copy import deepcopy
 from pathlib import Path
 
 import numpy as np
@@ -430,14 +431,16 @@ def train_dino(args):
     for epoch in range(start_epoch, args.epochs):
         data_loader.sampler.set_epoch(epoch)
 
+        # Update STN with EMA
         if epoch and epoch % args.ema_freq == 0:
-            stn.load_state_dict(stn_teacher.state_dict())
+            stn.load_state_dict(deepcopy(stn_teacher.state_dict()))
+        stn_state_dict = deepcopy(stn.state_dict())
         # ============ training one epoch of DINO ... ============
         train_stats = train_one_epoch(student, teacher, teacher_without_ddp, dino_loss,
                                       data_loader, optimizer, lr_schedule, wd_schedule, momentum_schedule,
                                       epoch, fp16_scaler, args, summary_writer,
                                       stn, stn_optimizer, stn_lr_schedule, stn_penalty, color_augment,
-                                      stn_teacher_without_ddp)
+                                      stn_teacher_without_ddp, stn_state_dict)
 
         # ============ writing logs ... ============
         save_dict = {
@@ -469,7 +472,7 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
                     optimizer, lr_schedule, wd_schedule, momentum_schedule,
                     epoch, fp16_scaler, args, summary_writer,
                     stn, stn_optimizer, stn_lr_schedule, stn_penalty, color_augment,
-                    stn_teacher_without_ddp):
+                    stn_teacher_without_ddp, stn_state_dict):
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
     for it, (images, _) in enumerate(metric_logger.log_every(data_loader, 10, header)):
@@ -545,6 +548,8 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
                 param_k.data.mul_(m).add_((1 - m) * param_q.detach().data)
             for param_q, param_k in zip(stn.module.parameters(), stn_teacher_without_ddp.parameters()):
                 param_k.data.mul_(m).add_((1 - m) * param_q.detach().data)
+        # Set STN to state before mini-batch
+        stn.load_state_dict(stn_state_dict)
 
         # logging
         torch.cuda.synchronize()
