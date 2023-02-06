@@ -474,6 +474,8 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
             teacher_output = teacher(stn_images[:2])  # only the 2 global views pass through the teacher
             student_output = student(stn_images)
             dino = dino_loss(student_output, teacher_output, epoch)
+            factor = penalty / dino
+            dino = utils.grad_rescale(dino, factor.item())
             loss = dino + penalty
 
         if not math.isfinite(penalty.item()):
