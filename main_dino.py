@@ -299,7 +299,7 @@ def train_dino(args):
     # ============ preparing loss ... ============
     dino_loss = DINOLoss(
         args.out_dim,
-        args.local_crops_number + 2,  # total number of crops = 2 global crops + local_crops_number
+        args.local_crops_number + 2 + 1,  # total number of crops = original view + 2 global crops + local_crops_number
         args.warmup_teacher_temp,
         args.teacher_temp,
         args.warmup_teacher_temp_epochs,
@@ -464,14 +464,14 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
             penalty = torch.tensor(0.).cuda()
             if stn_penalty:
                 penalty = stn_penalty(images=stn_images, target=images, thetas=thetas)
-
+            stn_images = [images] + stn_images
             if color_augment:
                 stn_images = color_augment(stn_images)
 
             if utils.is_main_process() and it % args.summary_writer_freq == 0:
                 utils.summary_writer_write_images_thetas(summary_writer, stn_images, images, thetas, epoch, it)
 
-            teacher_output = teacher(stn_images[:2])  # only the 2 global views pass through the teacher
+            teacher_output = teacher(stn_images[:3])  # the original and the 2 global views pass through the teacher
             student_output = student(stn_images)
             dino = dino_loss(student_output, teacher_output, epoch)
             loss = dino + penalty
@@ -570,7 +570,7 @@ class DINOLoss(nn.Module):
         # teacher centering and sharpening
         temp = self.teacher_temp_schedule[epoch]
         teacher_out = F.softmax((teacher_output - self.center) / temp, dim=-1)
-        teacher_out = teacher_out.detach().chunk(2)
+        teacher_out = teacher_out.detach().chunk(3)
 
         total_loss = 0
         n_loss_terms = 0
