@@ -314,7 +314,7 @@ def train_dino(args):
             resolution=32,
             exponent=2,
             bins=100,
-        ).cuda() if args.use_stn_penalty else None
+    ).cuda() if args.use_stn_penalty else None
 
     # ============ preparing optimizer ... ============
     params_groups = utils.get_params_groups(student)
@@ -438,6 +438,7 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
                     optimizer, lr_schedule, wd_schedule, momentum_schedule,
                     epoch, fp16_scaler, args, summary_writer,
                     stn, stn_optimizer, stn_lr_schedule, stn_penalty, color_augment):
+    overlap_penalty = penalties.OverlapPenalty(args.epsilon, args.invert_penalty)
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
     for it, (images, _) in enumerate(metric_logger.log_every(data_loader, 10, header)):
@@ -462,8 +463,10 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
         with torch.cuda.amp.autocast(fp16_scaler is not None):
             stn_images, thetas = stn(images)
             penalty = torch.tensor(0.).cuda()
+            overlap = torch.tensor(0.).cuda()
             if stn_penalty:
                 penalty = stn_penalty(images=stn_images, target=images, thetas=thetas)
+                overlap = overlap_penalty(thetas)
 
             if color_augment:
                 stn_images = color_augment(stn_images)
@@ -474,7 +477,7 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
             teacher_output = teacher(stn_images[:2])  # only the 2 global views pass through the teacher
             student_output = student(stn_images)
             dino = dino_loss(student_output, teacher_output, epoch)
-            loss = dino + penalty
+            loss = dino + penalty + overlap
 
         if not math.isfinite(penalty.item()):
             print("Penalty is {}, stopping training".format(loss.item()), force=True)
@@ -520,6 +523,7 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
         if stn_penalty:
             metric_logger.update(dino=dino.item())
             metric_logger.update(penalty=penalty.item())
+            metric_logger.update(overlap=overlap.item())
         if stn_optimizer:
             metric_logger.update(lrstn=stn_optimizer.param_groups[0]["lr"])
 
@@ -530,6 +534,7 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
             if args.use_stn_penalty:
                 summary_writer.add_scalar(tag="dino", scalar_value=dino.item(), global_step=it)
                 summary_writer.add_scalar(tag="penalty", scalar_value=penalty.item(), global_step=it)
+                summary_writer.add_scalar(tag="overlap", scalar_value=overlap.item(), global_step=it)
             if stn_optimizer:
                 summary_writer.add_scalar(tag="lr stn", scalar_value=stn_optimizer.param_groups[0]["lr"], global_step=it)
 
