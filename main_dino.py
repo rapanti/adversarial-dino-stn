@@ -186,6 +186,7 @@ def get_args_parser():
     parser.add_argument("--stn_color_augment", default=False, type=utils.bool_flag, help="todo")
     parser.add_argument("--summary_plot_size", default=16, type=int,
                         help="Defines the number of samples to show in the summary writer.")
+    parser.add_argument('--ema_freq', default=1, type=int, help='TODO')
 
     return parser
 
@@ -259,6 +260,25 @@ def train_dino(args):
         resize_size=args.resize_size,
     )
 
+    transform_net = STN(
+        mode=args.stn_mode,
+        invert_gradients=args.invert_stn_gradients,
+        separate_localization_net=args.separate_localization_net,
+        conv1_depth=args.stn_conv1_depth,
+        conv2_depth=args.stn_conv2_depth,
+        theta_norm=args.stn_theta_norm,
+        local_crops_number=args.local_crops_number,
+        global_crops_scale=args.global_crops_scale,
+        local_crops_scale=args.local_crops_scale,
+        resolution=args.stn_res,
+        unbounded_stn=args.use_unbounded_stn,
+    )
+    stn_teacher = AugmentationNetwork(
+        transform_net=transform_net,
+        resize_input=args.resize_input,
+        resize_size=args.resize_size,
+    )
+
     # multi-crop wrapper handles forward with inputs of different resolutions
     student = utils.MultiCropWrapper(student, DINOHead(
         embed_dim,
@@ -271,7 +291,7 @@ def train_dino(args):
         DINOHead(embed_dim, args.out_dim, args.use_bn_in_head),
     )
     # move networks to gpu
-    student, teacher, stn = student.cuda(), teacher.cuda(), stn.cuda()
+    student, teacher, stn, stn_teacher = student.cuda(), teacher.cuda(), stn.cuda(), stn_teacher.cuda()
 
     # synchronize batch norms (if any)
     if utils.has_batchnorms(student):
@@ -286,13 +306,21 @@ def train_dino(args):
         teacher_without_ddp = teacher
     if utils.has_batchnorms(stn):
         stn = nn.SyncBatchNorm.convert_sync_batchnorm(stn)
+        stn_teacher = nn.SyncBatchNorm.convert_sync_batchnorm(stn_teacher)
+        stn_teacher = nn.parallel.DistributedDataParallel(stn_teacher, device_ids=[args.gpu])
+        stn_teacher_without_ddp = stn_teacher.module
+    else:
+        stn_teacher_without_ddp = stn_teacher
 
     student = nn.parallel.DistributedDataParallel(student, device_ids=[args.gpu])
     stn = nn.parallel.DistributedDataParallel(stn, device_ids=[args.gpu])
     # teacher and student start with the same weights
     teacher_without_ddp.load_state_dict(student.module.state_dict())
+    stn_teacher_without_ddp.load_state_dict(stn.module.state_dict())
     # there is no backpropagation through the teacher, so no need for gradients
     for p in teacher.parameters():
+        p.requires_grad = False
+    for p in stn_teacher.parameters():
         p.requires_grad = False
     print(f"Student and Teacher are built: they are both {args.arch} network.")
 
@@ -314,7 +342,7 @@ def train_dino(args):
             resolution=32,
             exponent=2,
             bins=100,
-        ).cuda() if args.use_stn_penalty else None
+    ).cuda() if args.use_stn_penalty else None
 
     # ============ preparing optimizer ... ============
     params_groups = utils.get_params_groups(student)
@@ -402,11 +430,14 @@ def train_dino(args):
     for epoch in range(start_epoch, args.epochs):
         data_loader.sampler.set_epoch(epoch)
 
+        if epoch and epoch % args.ema_freq == 0:
+            stn.load_state_dict(stn_teacher.state_dict())
         # ============ training one epoch of DINO ... ============
         train_stats = train_one_epoch(student, teacher, teacher_without_ddp, dino_loss,
                                       data_loader, optimizer, lr_schedule, wd_schedule, momentum_schedule,
                                       epoch, fp16_scaler, args, summary_writer,
-                                      stn, stn_optimizer, stn_lr_schedule, stn_penalty, color_augment)
+                                      stn, stn_optimizer, stn_lr_schedule, stn_penalty, color_augment,
+                                      stn_teacher_without_ddp)
 
         # ============ writing logs ... ============
         save_dict = {
@@ -437,7 +468,8 @@ def train_dino(args):
 def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loader,
                     optimizer, lr_schedule, wd_schedule, momentum_schedule,
                     epoch, fp16_scaler, args, summary_writer,
-                    stn, stn_optimizer, stn_lr_schedule, stn_penalty, color_augment):
+                    stn, stn_optimizer, stn_lr_schedule, stn_penalty, color_augment,
+                    stn_teacher_without_ddp):
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
     for it, (images, _) in enumerate(metric_logger.log_every(data_loader, 10, header)):
@@ -510,6 +542,8 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
         with torch.no_grad():
             m = momentum_schedule[it]  # momentum parameter
             for param_q, param_k in zip(student.module.parameters(), teacher_without_ddp.parameters()):
+                param_k.data.mul_(m).add_((1 - m) * param_q.detach().data)
+            for param_q, param_k in zip(stn.module.parameters(), stn_teacher_without_ddp.parameters()):
                 param_k.data.mul_(m).add_((1 - m) * param_q.detach().data)
 
         # logging
