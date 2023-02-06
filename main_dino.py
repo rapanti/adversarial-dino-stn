@@ -438,7 +438,7 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
                     optimizer, lr_schedule, wd_schedule, momentum_schedule,
                     epoch, fp16_scaler, args, summary_writer,
                     stn, stn_optimizer, stn_lr_schedule, stn_penalty, color_augment):
-    overlap_penalty = penalties.OverlapPenalty(args.epsilon, args.invert_penalty)
+    overlap_penalty = penalties.OverlapPenalty(10, args.invert_penalty)
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
     for it, (images, _) in enumerate(metric_logger.log_every(data_loader, 10, header)):
