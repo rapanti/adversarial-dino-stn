@@ -36,7 +36,7 @@ def eval_linear(args, dist_inited=False):
 
     print("git:\n  {}\n".format(utils.get_sha()))
     print("\n".join("%s: %s" % (k, str(v)) for k, v in sorted(dict(vars(args)).items())))
-    with (Path(args.output_dir) / "settings.json").open("w") as f:
+    with (Path(args.output_dir) / "settings.eval").open("w") as f:
         json.dump(args.__dict__, f, indent=2, sort_keys=True)
 
     # ============ building network ... ============
@@ -57,7 +57,7 @@ def eval_linear(args, dist_inited=False):
         embed_dim = model.fc.weight.shape[1]
         model.fc = nn.Identity()
     else:
-        print(f"Unknow architecture: {args.arch}")
+        print(f"Unknown architecture: {args.arch}")
         sys.exit(1)
     model.cuda()
     model.eval()
@@ -143,8 +143,6 @@ def eval_linear(args, dist_inited=False):
             test_stats = validate_network(val_loader, model, linear_classifier, args.n_last_blocks,
                                           args.avgpool_patchtokens, args)
             print(f"Accuracy at epoch {epoch} of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
-            if best_acc < test_stats["acc1"]:
-                torch.save(linear_classifier.state_dict(), os.path.join(args.output_dir, "best_checkpoint.pth"))
             best_acc = max(best_acc, test_stats["acc1"])
             print(f'Max accuracy so far: {best_acc:.2f}%')
             log_stats = {**{k: v for k, v in log_stats.items()},
@@ -155,7 +153,7 @@ def eval_linear(args, dist_inited=False):
                 writer.add_scalar(tag="best-acc", scalar_value=best_acc, global_step=epoch)
 
         if utils.is_main_process():
-            with (Path(args.output_dir) / "log.txt").open("a") as f:
+            with (Path(args.output_dir) / "log.eval").open("a") as f:
                 f.write(json.dumps(log_stats) + "\n")
             save_dict = {
                 "epoch": epoch + 1,
@@ -210,9 +208,8 @@ def train(model, linear_classifier, optimizer, loader, epoch, n, avgpool, writer
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
 
         if writer:
-            writer.add_scalar(tag="loss", scalar_value=loss.item(), global_step=it)
-            writer.add_scalar(tag="lr", scalar_value=optimizer.param_groups[0]["lr"], global_step=it)
-            writer.add_scalar(tag="weight_decay", scalar_value=optimizer.param_groups[0]["weight_decay"], global_step=it)
+            writer.add_scalar(tag="loss(eval)", scalar_value=loss.item(), global_step=it)
+            writer.add_scalar(tag="lr(eval)", scalar_value=optimizer.param_groups[0]["lr"], global_step=it)
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
@@ -222,7 +219,7 @@ def train(model, linear_classifier, optimizer, loader, epoch, n, avgpool, writer
 @torch.no_grad()
 def validate_network(loader, model, linear_classifier, n, avgpool, args):
     linear_classifier.eval()
-    metric_logger = utils.MetricLogger(delimiter="  ")
+    metric_logger = utils.MetricLogger(delimiter=" ")
     header = 'Test:'
     for samples, targets in metric_logger.log_every(loader, 20, header):
         # move to gpu
@@ -350,7 +347,6 @@ if __name__ == '__main__':
     parser.add_argument('--patch_size', default=16, type=int, help='Patch resolution of the model.')
     parser.add_argument('--img_size', default=224, type=int, help='images input size')
     parser.add_argument('--pretrained_weights', default='', type=str, help="Path to pretrained weights to evaluate.")
-    parser.add_argument('--pretrained_linear_weights', default='', type=str, help="Path to pretrained linear weights.")
     parser.add_argument("--checkpoint_key", default="teacher", type=str,
                         help='Key to use in the checkpoint (example: "teacher")')
     parser.add_argument('--n_last_blocks', default=4, type=int, help="""Concatenate [CLS] tokens for the `n` last 
