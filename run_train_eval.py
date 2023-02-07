@@ -151,6 +151,7 @@ parser.add_argument("--invert_penalty", default=False, type=utils.bool_flag,
 parser.add_argument("--stn_color_augment", default=False, type=utils.bool_flag, help="todo")
 parser.add_argument("--summary_plot_size", default=16, type=int,
                     help="Defines the number of samples to show in the summary writer.")
+parser.add_argument("--ema_freq", default=1, type=int, help='TODO')
 # ======================================================================================================================
 # =================================================   EVAL PARAMETER   =================================================
 # ======================================================================================================================
