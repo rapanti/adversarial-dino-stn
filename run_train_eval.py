@@ -151,6 +151,12 @@ parser.add_argument("--invert_penalty", default=False, type=utils.bool_flag,
 parser.add_argument("--stn_color_augment", default=False, type=utils.bool_flag, help="todo")
 parser.add_argument("--summary_plot_size", default=16, type=int,
                     help="Defines the number of samples to show in the summary writer.")
+parser.add_argument("--penalty_target", default='mean', type=str, choices=['zero', 'one', 'mean', 'rand'],
+                    help="Specify the type of target of the penalty. Here, the target is the area with respect to"
+                         "the original image. `zero` and `one` are the values itself. `mean` and `rand` are"
+                         "inferred with respect to given crop-scales.")
+parser.add_argument("--min_glb_overlap", default=0.5, type=float, help="The minimal overlap between the two global crops.")
+parser.add_argument("--min_lcl_overlap", default=0.1, type=float, help="The minimal overlap between two local crops.")
 # ======================================================================================================================
 # =================================================   EVAL PARAMETER   =================================================
 # ======================================================================================================================

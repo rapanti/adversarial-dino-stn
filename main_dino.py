@@ -186,6 +186,12 @@ def get_args_parser():
     parser.add_argument("--stn_color_augment", default=False, type=utils.bool_flag, help="todo")
     parser.add_argument("--summary_plot_size", default=16, type=int,
                         help="Defines the number of samples to show in the summary writer.")
+    parser.add_argument("--penalty_target", default='mean', type=str, choices=['zero', 'one', 'mean', 'rand'],
+                        help="Specify the type of target of the penalty. Here, the target is the area with respect to"
+                             "the original image. `zero` and `one` are the values itself. `mean` and `rand` are"
+                             "inferred with respect to given crop-scales.")
+    parser.add_argument("--min_glb_overlap", default=0.5, type=float, help="The minimal overlap between the two global crops.")
+    parser.add_argument("--min_lcl_overlap", default=0.1, type=float, help="The minimal overlap between two local crops.")
 
     return parser
 
@@ -307,14 +313,17 @@ def train_dino(args):
     ).cuda()
 
     stn_penalty = penalty_dict[args.penalty_loss](
-            invert=args.invert_penalty,
-            eps=args.epsilon,
-            local_crops_scale=args.local_crops_scale,
-            global_crops_scale=args.global_crops_scale,
-            resolution=32,
-            exponent=2,
-            bins=100,
-        ).cuda() if args.use_stn_penalty else None
+        invert=args.invert_penalty,
+        eps=args.epsilon,
+        target=args.penalty_target,
+        local_crops_scale=args.local_crops_scale,
+        global_crops_scale=args.global_crops_scale,
+        min_glb_overlap=args.min_glb_overlap,
+        min_lcl_overlap=args.min_lcl_overlap,
+        resolution=32,
+        exponent=2,
+        bins=100,
+    ).cuda() if args.use_stn_penalty else None
 
     # ============ preparing optimizer ... ============
     params_groups = utils.get_params_groups(student)
@@ -376,7 +385,7 @@ def train_dino(args):
     print(f"Loss, optimizer and schedulers ready.")
 
     # ============ ColorAugments after STN ============
-    color_augment = utils.ColorAugmentation(args.local_crops_number) if args.stn_color_augment else None
+    color_augment = utils.ColorAugmentation(args.local_crops_number, args.dataset) if args.stn_color_augment else None
 
     # ============ optionally resume training ... ============
     to_restore = {"epoch": 0}

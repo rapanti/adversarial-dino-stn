@@ -69,36 +69,65 @@ class OverlapPenalty(nn.Module):
     2. _flatten_grids + _overlap: similar to affine grids but flattened per axes, therefore the minima and maxima
         are calculated per axes.
     """
-    def __init__(self, eps=1, invert=False, **kwargs):
+
+    def __init__(self,
+                 eps=1,
+                 invert=False,
+                 local_crops_scale=(0.05, 0.4),
+                 global_crops_scale=(0.4, 1),
+                 min_lcl_overlap=0.1,
+                 min_glb_overlap=0.5,
+                 target='one', **kwargs):
         super().__init__()
         self.eps = eps
         self.invert = invert
+        self.target = target
+        self.local_crops_scale = local_crops_scale
+        self.global_crops_scale = global_crops_scale
+        self.min_lcl_overlap = min_lcl_overlap
+        self.min_glb_overlap = min_glb_overlap
 
     def forward(self, thetas, **args):
         # create own affine grids of thetas
         # grids = self._affine_grids(thetas) working with self._overlap1
         grids = self._flatten_grids(thetas)
 
-        total_loss = 0
-        n_loss_terms = 0
-
         # global views
         global1, global2 = grids[:2]
-        # loss = self._overlap1(global1, global2) working with _affine_grids
-        loss = self._overlap(global1, global2)
-        total_loss += loss.mean()
-        n_loss_terms += 1
-
+        overlap = self._overlap(global1, global2)  # self._overlap1(global1, global2) working with _affine_grids
+        overlap_loss = (self.min_glb_overlap - overlap).abs().mean()  # enforce a minimal_overlap
+        n_loss_terms = 1
         # local views
         for ida, a in enumerate(grids[2:]):
             for idb in range(ida + 3, len(grids)):
                 b = grids[idb]
                 # loss = self._overlap1(a, b) working with _affine_grids
-                loss = self._overlap(a, b)
-                total_loss += loss.mean()
+                overlap = self._overlap(a, b)
+                overlap_loss += (self.min_lcl_overlap - overlap).abs().mean()  # enforce a minimal_overlap
                 n_loss_terms += 1
-        total_loss /= n_loss_terms
+        overlap_loss /= n_loss_terms
 
+        area_loss = torch.tensor(0.).cuda()
+        for i, grid in enumerate(grids):
+            target = torch.tensor(0.).repeat(grid.size(0), 1).to(grid.get_device())
+            if self.target == 'one':
+                target = torch.tensor(1.).repeat(grid.size(0), 1).to(grid.get_device())
+            elif self.target == 'mean':
+                a, b = self.global_crops_scale if i < 2 else self.local_crops_scale
+                m = (a + b) / 2
+                target = torch.tensor(m).repeat(grid.size(0), 1).to(grid.get_device())
+            elif self.target == 'rand':
+                a, b = self.global_crops_scale if i < 2 else self.local_crops_scale
+                target = (b - a) * torch.rand(grid.size(0), device=grid.get_device()) + a
+            area = self._area(grid)
+            loss = target - area
+            area_loss += loss.abs().mean()
+
+        area_loss /= len(grids)
+        weight = n_loss_terms / len(grids)
+        area_loss = grad_rescale(area_loss, weight)
+
+        total_loss = area_loss + overlap_loss
         if self.invert:
             total_loss = grad_reverse(total_loss, self.eps)
         else:
@@ -126,6 +155,17 @@ class OverlapPenalty(nn.Module):
             grid = grid.reshape(grid.size(0), 2, -1)  # grid.shape: [bs, 2, 4]
             grids.append(grid)
         return grids
+
+    @staticmethod
+    def _area(grid):
+        left, right = grid[:, 0, :].min(dim=1).values, grid[:, 0, :].max(dim=1).values  # min/max of x-coord/axis
+        top, bottom = grid[:, 1, :].min(dim=1).values, grid[:, 1, :].max(dim=1).values  # min/max of y-coord/axis
+
+        x = right - left
+        y = bottom - top
+        area = x * y / 4
+
+        return area
 
     @staticmethod
     def _overlap(grid1, grid2):

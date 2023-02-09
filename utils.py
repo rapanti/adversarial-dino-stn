@@ -510,7 +510,7 @@ def init_distributed_mode(args):
         sys.exit(1)
 
     dist.init_process_group(
-        backend="nccl",
+        backend="gloo" if 'win' in sys.platform else "nccl",
         init_method=args.dist_url,
         world_size=args.world_size,
         rank=args.rank,
@@ -948,7 +948,12 @@ def print_gradients(stn, args):
 
 
 class ColorAugmentation(object):
-    def __init__(self, local_crops_number):
+    def __init__(self, local_crops_number, dataset):
+        if dataset == "CIFAR10":
+            normalize = transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+        else:
+            normalize = transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+
         self.local_crops_number = local_crops_number
         color_jitter = transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1)
         gaussian_blur = transforms.GaussianBlur(1, (0.1, 2.0))
@@ -956,7 +961,7 @@ class ColorAugmentation(object):
             transforms.RandomApply([color_jitter], p=0.8),
             transforms.RandomGrayscale(p=0.2),
             transforms.RandomApply([gaussian_blur], p=1.0),
-            transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+            normalize,
             transforms.ConvertImageDtype(torch.float32),
             # transforms.ToTensor(),
         ])
@@ -967,7 +972,7 @@ class ColorAugmentation(object):
             transforms.RandomApply([gaussian_blur], p=0.1),
             transforms.RandomSolarize(1, p=0.2),
             # img is already normalized as input to STN; bound = 1 if img.is_floating_point() else 255
-            transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+            normalize,
             transforms.ConvertImageDtype(torch.float32),
         ])
 
@@ -975,7 +980,7 @@ class ColorAugmentation(object):
             transforms.RandomApply([color_jitter], p=0.8),
             transforms.RandomGrayscale(p=0.2),
             transforms.RandomApply([gaussian_blur], p=0.5),
-            transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+            normalize,
             transforms.ConvertImageDtype(torch.float32),
         ])
 
@@ -989,29 +994,19 @@ class ColorAugmentation(object):
 def image_grid(images, original_images, epoch, plot_size=16):
     """Return a 5x5 grid of the MNIST images as a matplotlib figure."""
     # Create a figure to contain the plot.
-    figure = plt.figure(figsize=(20, 50))
-    figure.tight_layout()
+    x = len(images) + 1
     num_images = min(len(original_images), plot_size)
+    figure = plt.figure(figsize=(x, num_images))
     plt.subplots_adjust(hspace=0.5)
 
-    g1 = images[0]
-    g2 = images[1]
-    l1 = images[2]
-    l2 = images[3]
-
-    titles = [f"orig@{epoch} epoch", "global 1", "global 2", "local 1", "local 2"]
+    titles = [f"orig@{epoch}", "global 1", "global 2"] + [f"local {n+1}" for n in range(len(images))]
     total = 0
     for i in range(num_images):  # orig_img in enumerate(original_images, 1):
-        orig_img = original_images[i]
-        g1_img = g1[i]
-        g2_img = g2[i]
-        l1_img = l1[i]
-        l2_img = l2[i]
-        all_images = [orig_img, g1_img, g2_img, l1_img, l2_img]
-        for j in range(5):
+        all_images = [original_images[i]] + [img[i] for img in images]
+        for j in range(len(all_images)):
             total += 1
 
-            plt.subplot(num_images, 5, total, title=titles[j])
+            plt.subplot(num_images, len(all_images), total, title=titles[j])
             plt.xticks([])
             plt.yticks([])
             plt.grid(False)
@@ -1026,7 +1021,7 @@ def image_grid(images, original_images, epoch, plot_size=16):
                 img = img.squeeze()
 
             plt.imshow(np.clip(img, 0, 1))
-
+    figure.tight_layout()
     return figure
 
 
