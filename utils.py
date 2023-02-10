@@ -17,6 +17,7 @@ Misc functions.
 Mostly copy-paste from torchvision references or other public repos like DETR:
 https://github.com/facebookresearch/detr/blob/master/util/misc.py
 """
+import argparse
 import os
 import sys
 import time
@@ -24,12 +25,15 @@ import math
 import random
 import datetime
 import subprocess
+import warnings
 from collections import defaultdict, deque
 
 import numpy as np
 import torch
 from torch import nn
 import torch.distributed as dist
+from torchvision import datasets
+from torchvision import transforms
 from PIL import ImageFilter, ImageOps
 
 
@@ -486,7 +490,7 @@ def init_distributed_mode(args):
         sys.exit(1)
 
     dist.init_process_group(
-        backend="nccl",
+        backend=args.dist_backend,
         init_method=args.dist_url,
         world_size=args.world_size,
         rank=args.rank,
@@ -827,3 +831,45 @@ def multi_scale(samples, model):
     v /= 3
     v /= v.norm()
     return v
+
+
+def build_transform(args):
+    if not args.resize_all_inputs and args.dataset == "ImageNet":
+        return transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+            ])
+    elif args.resize_all_inputs and args.dataset == "ImageNet":
+        return transforms.Compose([
+                transforms.Resize(256),
+                transforms.CenterCrop(224),
+                transforms.ToTensor(),
+                transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+            ])
+    elif args.dataset == "CIFAR10":
+        return transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+                # transforms.Normalize((0.4914, 0.4822, 0.4465), (0.247, 0.243, 0.261)),
+            ])
+    elif args.dataset == "CIFAR100":
+        return transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+            ])
+    print(f"Does not support dataset: {args.dataset}")
+    sys.exit(1)
+
+
+def build_dataset(is_train, args, transform=None):
+    transform = transform if transform else build_transform(args)
+    if args.dataset == 'CIFAR10':
+        return datasets.CIFAR10(args.data_path, download=True, train=is_train, transform=transform)
+    if args.dataset == 'CIFAR100':
+        return datasets.CIFAR100(args.data_path, download=True, train=is_train, transform=transform)
+    elif args.dataset == 'ImageNet':
+        root = os.path.join(args.data_path, 'train' if is_train else 'val')
+        dataset = datasets.ImageFolder(root, transform=transform)
+        return dataset
+    print(f"Does not support dataset: {args.dataset}")
+    sys.exit(1)
