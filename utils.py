@@ -30,6 +30,7 @@ from collections import defaultdict, deque
 
 import numpy as np
 import seaborn as sns
+import kornia.augmentation as K
 import torch
 from torch import nn
 import torch.distributed as dist
@@ -948,44 +949,38 @@ def print_gradients(stn, args):
 
 
 class ColorAugmentation(object):
-    def __init__(self, local_crops_number, dataset):
+    def __init__(self, dataset):
         if dataset == "CIFAR10":
-            normalize = transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+            normalize = K.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])
         else:
-            normalize = transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+            normalize = K.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
 
-        self.local_crops_number = local_crops_number
-        color_jitter = transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1)
-        gaussian_blur = transforms.GaussianBlur(1, (0.1, 2.0))
-        self.transform_global1 = transforms.Compose([
-            transforms.RandomApply([color_jitter], p=0.8),
-            transforms.RandomGrayscale(p=0.2),
-            transforms.RandomApply([gaussian_blur], p=1.0),
-            normalize,
-            transforms.ConvertImageDtype(torch.float32),
-            # transforms.ToTensor(),
-        ])
+        color_jitter = K.ImageSequential(
+            K.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1, p=0.8),
+            K.RandomGrayscale(p=0.2),
+        )
 
-        self.transform_global2 = transforms.Compose([
-            transforms.RandomApply([color_jitter], p=0.8),
-            transforms.RandomGrayscale(p=0.2),
-            transforms.RandomApply([gaussian_blur], p=0.1),
-            transforms.RandomSolarize(1, p=0.2),
-            # img is already normalized as input to STN; bound = 1 if img.is_floating_point() else 255
+        # first global crop
+        self.global_transform1 = K.ImageSequential(
+            color_jitter,
+            K.RandomGaussianBlur((1, 1), (0.1, 2.0), p=1.0),
             normalize,
-            transforms.ConvertImageDtype(torch.float32),
-        ])
-
-        self.transform_local = transforms.Compose([
-            transforms.RandomApply([color_jitter], p=0.8),
-            transforms.RandomGrayscale(p=0.2),
-            transforms.RandomApply([gaussian_blur], p=0.5),
+        )
+        # second global crop
+        self.global_transform2 = K.ImageSequential(
+            color_jitter,
+            K.RandomGaussianBlur((1, 1), (0.1, 2.0), p=0.1),
+            K.RandomSolarize(0.5, p=0.2),
             normalize,
-            transforms.ConvertImageDtype(torch.float32),
-        ])
+        )
+        self.transform_local = K.ImageSequential(
+            color_jitter,
+            K.RandomGaussianBlur((1, 1), (0.1, 2.0), p=0.5),
+            normalize,
+        )
 
     def __call__(self, images):
-        crops = [self.transform_global1(images[0]), self.transform_global2(images[1])]
+        crops = [self.global_transform1(images[0]), self.global_transform2(images[1])]
         for img in images[2:]:
             crops.append(self.transform_local(img))
         return crops

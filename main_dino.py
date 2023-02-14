@@ -35,6 +35,7 @@ from vision_transformer import DINOHead
 
 import penalties
 from stn import AugmentationNetwork, STN
+from mtadam import MTAdam
 
 torchvision_archs = sorted(name for name in torchvision_models.__dict__
                            if name.islower() and not name.startswith("__")
@@ -107,7 +108,7 @@ def get_args_parser():
                         help="Number of epochs for the linear learning-rate warm up.")
     parser.add_argument('--min_lr', type=float, default=1e-6, help="""Target LR at the
         end of optimization. We use a cosine LR schedule with linear warmup.""")
-    parser.add_argument('--optimizer', default='adamw', type=str, choices=['adamw', 'sgd', 'lars'],
+    parser.add_argument('--optimizer', default='adamw', type=str, choices=['adamw', 'sgd', 'lars', 'mtadam'],
                         help="""Type of optimizer. We recommend using adamw with ViTs.""")
     parser.add_argument('--drop_path_rate', type=float, default=0.1, help="stochastic depth rate")
 
@@ -345,13 +346,16 @@ def train_dino(args):
 
     if args.optimizer == "adamw":
         optimizer = torch.optim.AdamW(params_groups)  # to use with ViTs
-        stn_optimizer = torch.optim.AdamW(stn.parameters()) if args.use_stn_optimizer else None
+        stn_optimizer = MTAdam(stn.parameters()) if args.use_stn_optimizer else None
     elif args.optimizer == "sgd":
         optimizer = torch.optim.SGD(params_groups, lr=0, momentum=0.9)  # lr is set by scheduler
         stn_optimizer = torch.optim.SGD(stn.parameters(), lr=0, momentum=0.9) if args.use_stn_optimizer else None
     elif args.optimizer == "lars":
         optimizer = utils.LARS(params_groups)  # to use with convnet and large batches
         stn_optimizer = torch.optim.LARS(stn.parameters()) if args.use_stn_optimizer else None
+    elif args.optimizer == "mtadam":
+        optimizer = MTAdam(params_groups)  # to use with convnet and large batches
+        stn_optimizer = MTAdam(stn.parameters()) if args.use_stn_optimizer else None
     else:
         print(f"Optimizer {args.optimizer} not supported.")
         sys.exit(1)
@@ -385,7 +389,7 @@ def train_dino(args):
     print(f"Loss, optimizer and schedulers ready.")
 
     # ============ ColorAugments after STN ============
-    color_augment = utils.ColorAugmentation(args.local_crops_number, args.dataset) if args.stn_color_augment else None
+    color_augment = utils.ColorAugmentation(args.dataset) if args.stn_color_augment else None
 
     # ============ optionally resume training ... ============
     to_restore = {"epoch": 0}
@@ -474,11 +478,11 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
             if stn_penalty:
                 penalty = stn_penalty(images=stn_images, target=images, thetas=thetas)
 
-            if color_augment:
-                stn_images = color_augment(stn_images)
-
             if utils.is_main_process() and it % args.summary_writer_freq == 0:
                 utils.summary_writer_write_images_thetas(summary_writer, stn_images, images, thetas, epoch, it)
+
+            if color_augment:
+                stn_images = color_augment(stn_images)
 
             teacher_output = teacher(stn_images[:2])  # only the 2 global views pass through the teacher
             student_output = student(stn_images)
@@ -486,34 +490,27 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
             loss = dino + penalty
 
         if not math.isfinite(penalty.item()):
-            print("Penalty is {}, stopping training".format(loss.item()), force=True)
+            print("Penalty is {}, stopping training".format(penalty.item()), force=True)
             sys.exit(2)
 
         if not math.isfinite(dino.item()):
-            print("DINOLoss is {}, stopping training".format(loss.item()), force=True)
+            print("DINOLoss is {}, stopping training".format(dino.item()), force=True)
             sys.exit(2)
 
         # student update
         optimizer.zero_grad()
         param_norms = None
         if fp16_scaler is None:
-            loss.backward()
+            # dino.backward()
+            if stn_optimizer:
+                stn_optimizer.step([penalty, dino], [1, 1], None)
             if args.clip_grad:
                 param_norms = utils.clip_gradients(student, args.clip_grad)
             utils.cancel_gradients_last_layer(epoch, student, args.freeze_last_layer)
             optimizer.step()
-            if stn_optimizer:
-                stn_optimizer.step()
         else:
-            fp16_scaler.scale(loss).backward()
-            if args.clip_grad:
-                fp16_scaler.unscale_(optimizer)  # unscale the gradients of optimizer's assigned params in-place
-                param_norms = utils.clip_gradients(student, args.clip_grad)
-            utils.cancel_gradients_last_layer(epoch, student, args.freeze_last_layer)
-            fp16_scaler.step(optimizer)
-            if stn_optimizer:
-                fp16_scaler.step(stn_optimizer)
-            fp16_scaler.update()
+            print('NoNoNo, fp16 not working with MTAdam')
+            sys.exit(1)
 
         # EMA update for the teacher
         with torch.no_grad():
