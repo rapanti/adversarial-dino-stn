@@ -2,9 +2,9 @@
 #SBATCH -p mlhiwidlc_gpu-rtx2080-advanced # partition (queue)
 #SBATCH -t 23:59:59 # time (D-HH:MM:SS)
 #SBATCH --gres=gpu:8
-#SBATCH -J dino-stn-mtadam-tcp # sets the job name. If not specified, the file name will be used as job name
-#SBATCH -o /work/dlclarge2/rapanti-metassl-dino-stn/experiments/dino-stn-mtadam-tcp/log/%A.%a.%N.out  # STDOUT
-#SBATCH -e /work/dlclarge2/rapanti-metassl-dino-stn/experiments/dino-stn-mtadam-tcp/log/%A.%a.%N.out  # STDERR
+#SBATCH -J dino-stn-mtadam-tcp-new # sets the job name. If not specified, the file name will be used as job name
+#SBATCH -o /work/dlclarge2/rapanti-metassl-dino-stn/experiments/dino-stn-mtadam-tcp-new/log/%A.%a.%N.out  # STDOUT
+#SBATCH -e /work/dlclarge2/rapanti-metassl-dino-stn/experiments/dino-stn-mtadam-tcp-new/log/%A.%a.%N.out  # STDERR
 #SBATCH --array 0-7%1
 
 # Print some information about the job to STDOUT
@@ -15,7 +15,7 @@ echo "Running job $SLURM_JOB_NAME with given JID $SLURM_JOB_ID on queue $SLURM_J
 source /home/rapanti/.profile
 source activate dino
 
-EXP_D=/work/dlclarge2/rapanti-metassl-dino-stn/experiments/dino-stn-mtadam-tcp
+EXP_D=/work/dlclarge2/rapanti-metassl-dino-stn/experiments/dino-stn-mtadam-tcp-new
 
 # Job to perform
 torchrun \
@@ -30,11 +30,11 @@ torchrun \
       --data_path /work/dlclarge2/rapanti-metassl-dino-stn/datasets/CIFAR10 \
       --dataset CIFAR10 \
       --output_dir $EXP_D \
-      --epochs 100 \
-      --warmup_epochs 10 \
+      --epochs 300 \
+      --warmup_epochs 30 \
       --batch_size 256 \
       --use_fp16 false \
-      --saveckp_freq 34 \
+      --saveckp_freq 100 \
       --stn_res 32 16 \
       --invert_stn_gradients true \
       --use_stn_optimizer true \
@@ -50,10 +50,7 @@ torchrun \
       --summary_writer_freq 100
 
 x=$?
-if [ $x == 0 ]
-then
-  scancel $SLURM_JOB_ID
-fi
+echo $x
 
 # Print some Information about the end-time to STDOUT
 echo "DONE";

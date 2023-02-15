@@ -892,28 +892,17 @@ def grad_rescale(x, scale=1.0):
 
 def build_transform(args):
     if not args.resize_all_inputs and args.dataset == "ImageNet":
-        return transforms.Compose([
-                transforms.ToTensor(),
-                transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
-            ])
+        return transforms.ToTensor()
     elif args.resize_all_inputs and args.dataset == "ImageNet":
         return transforms.Compose([
                 transforms.Resize(256),
                 transforms.CenterCrop(224),
                 transforms.ToTensor(),
-                transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
             ])
     elif args.dataset == "CIFAR10":
-        return transforms.Compose([
-                transforms.ToTensor(),
-                transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-                # transforms.Normalize((0.4914, 0.4822, 0.4465), (0.247, 0.243, 0.261)),
-            ])
+        return transforms.ToTensor()
     elif args.dataset == "CIFAR100":
-        return transforms.Compose([
-                transforms.ToTensor(),
-                transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
-            ])
+        return transforms.ToTensor()
     print(f"Does not support dataset: {args.dataset}")
     sys.exit(1)
 
@@ -932,6 +921,45 @@ def build_dataset(is_train, args):
     sys.exit(1)
 
 
+class ColorAugmentation(object):
+    def __init__(self, dataset):
+        if dataset == "CIFAR10":
+            normalize = K.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])
+        else:
+            normalize = K.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+
+        # first global crop
+        self.global_transform1 = K.ImageSequential(
+            K.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1, p=0.8),
+            K.RandomGrayscale(p=0.2),
+            K.RandomGaussianBlur((1, 1), (0.1, 2.0), p=1.0),
+            normalize,
+            same_on_batch=True,
+        )
+        # second global crop
+        self.global_transform2 = K.ImageSequential(
+            K.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1, p=0.8),
+            K.RandomGrayscale(p=0.2),
+            K.RandomGaussianBlur((1, 1), (0.1, 2.0), p=0.1),
+            K.RandomSolarize(0.5, p=0.2),
+            normalize,
+            same_on_batch=True,
+        )
+        self.transform_local = K.ImageSequential(
+            K.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1, p=0.8),
+            K.RandomGrayscale(p=0.2),
+            K.RandomGaussianBlur((1, 1), (0.1, 2.0), p=0.5),
+            normalize,
+            same_on_batch=True,
+        )
+
+    def __call__(self, images):
+        crops = [self.global_transform1(images[0]), self.global_transform2(images[1])]
+        for img in images[2:]:
+            crops.append(self.transform_local(img))
+        return crops
+
+
 def print_gradients(stn, args):
     print(stn.module.transform_net.localization_net.heads[3].linear2.weight)
     if args.separate_localization_net:
@@ -946,44 +974,6 @@ def print_gradients(stn, args):
         print(stn.module.transform_net.localization_net.backbones[1].conv2.weight.grad)
     else:
         print(stn.module.transform_net.localization_net.backbones[0].conv2.weight.grad)
-
-
-class ColorAugmentation(object):
-    def __init__(self, dataset):
-        if dataset == "CIFAR10":
-            normalize = K.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])
-        else:
-            normalize = K.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-
-        color_jitter = K.ImageSequential(
-            K.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1, p=0.8),
-            K.RandomGrayscale(p=0.2),
-        )
-
-        # first global crop
-        self.global_transform1 = K.ImageSequential(
-            color_jitter,
-            K.RandomGaussianBlur((1, 1), (0.1, 2.0), p=1.0),
-            normalize,
-        )
-        # second global crop
-        self.global_transform2 = K.ImageSequential(
-            color_jitter,
-            K.RandomGaussianBlur((1, 1), (0.1, 2.0), p=0.1),
-            K.RandomSolarize(0.5, p=0.2),
-            normalize,
-        )
-        self.transform_local = K.ImageSequential(
-            color_jitter,
-            K.RandomGaussianBlur((1, 1), (0.1, 2.0), p=0.5),
-            normalize,
-        )
-
-    def __call__(self, images):
-        crops = [self.global_transform1(images[0]), self.global_transform2(images[1])]
-        for img in images[2:]:
-            crops.append(self.transform_local(img))
-        return crops
 
 
 def image_grid(images, original_images, epoch, plot_size=16):

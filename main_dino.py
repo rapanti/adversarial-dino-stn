@@ -499,6 +499,7 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
 
         # student update
         optimizer.zero_grad()
+        stn_optimizer.zero_grad()
         param_norms = None
         if fp16_scaler is None:
             # dino.backward()
