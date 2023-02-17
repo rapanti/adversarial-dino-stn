@@ -889,34 +889,6 @@ def grad_rescale(x, scale=1.0):
     return GradientRescale.apply(x)
 
 
-def build_transform(args):
-    if not args.resize_all_inputs and args.dataset == "ImageNet":
-        return transforms.Compose([
-                transforms.ToTensor(),
-                transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
-            ])
-    elif args.resize_all_inputs and args.dataset == "ImageNet":
-        return transforms.Compose([
-                transforms.Resize(256),
-                transforms.CenterCrop(224),
-                transforms.ToTensor(),
-                transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
-            ])
-    elif args.dataset == "CIFAR10":
-        return transforms.Compose([
-                transforms.ToTensor(),
-                transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-                # transforms.Normalize((0.4914, 0.4822, 0.4465), (0.247, 0.243, 0.261)),
-            ])
-    elif args.dataset == "CIFAR100":
-        return transforms.Compose([
-                transforms.ToTensor(),
-                transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
-            ])
-    print(f"Does not support dataset: {args.dataset}")
-    sys.exit(1)
-
-
 def build_dataset(is_train, args):
     transform = build_transform(args)
     if args.dataset == 'CIFAR10':
@@ -931,47 +903,56 @@ def build_dataset(is_train, args):
     sys.exit(1)
 
 
-def print_gradients(stn, args):
-    print(stn.module.transform_net.localization_net.heads[3].linear2.weight)
-    if args.separate_localization_net:
-        print(stn.module.transform_net.localization_net.backbones[1].conv2.weight)
-    else:
-        print(stn.module.transform_net.localization_net.backbones[0].conv2.weight)
-    print("-------------------------sanity check local grads-------------------------------")
-    print(stn.module.transform_net.localization_net.heads[3].linear2.weight.grad)
-    print("-------------------------sanity check global grads-------------------------------")
-    print(stn.module.transform_net.localization_net.heads[0].linear2.weight.grad)
-    if args.separate_localization_net:
-        print(stn.module.transform_net.localization_net.backbones[1].conv2.weight.grad)
-    else:
-        print(stn.module.transform_net.localization_net.backbones[0].conv2.weight.grad)
+def build_transform(args):
+    if not args.resize_all_inputs and args.dataset == "ImageNet":
+        return transforms.Compose([
+                transforms.ToTensor(),
+                # transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+            ])
+    elif args.resize_all_inputs and args.dataset == "ImageNet":
+        return transforms.Compose([
+                transforms.Resize(256),
+                transforms.CenterCrop(224),
+                transforms.ToTensor(),
+                # transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+            ])
+    elif args.dataset == "CIFAR10":
+        return transforms.Compose([
+                transforms.ToTensor(),
+                # transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+            ])
+    elif args.dataset == "CIFAR100":
+        return transforms.Compose([
+                transforms.ToTensor(),
+                # transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+            ])
+    print(f"Does not support dataset: {args.dataset}")
+    sys.exit(1)
 
 
 class ColorAugmentation(object):
-    def __init__(self, local_crops_number, dataset):
+    def __init__(self, dataset):
         if dataset == "CIFAR10":
             normalize = transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
-        else:
+        elif dataset == "ImageNet":
             normalize = transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+        else:
+            normalize = transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
 
-        self.local_crops_number = local_crops_number
         color_jitter = transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1)
-        gaussian_blur = transforms.GaussianBlur(1, (0.1, 2.0))
+        gaussian_blur = transforms.GaussianBlur(3, (0.1, 2.0))
         self.transform_global1 = transforms.Compose([
             transforms.RandomApply([color_jitter], p=0.8),
             transforms.RandomGrayscale(p=0.2),
             transforms.RandomApply([gaussian_blur], p=1.0),
             normalize,
-            transforms.ConvertImageDtype(torch.float32),
-            # transforms.ToTensor(),
         ])
 
         self.transform_global2 = transforms.Compose([
             transforms.RandomApply([color_jitter], p=0.8),
             transforms.RandomGrayscale(p=0.2),
             transforms.RandomApply([gaussian_blur], p=0.1),
-            transforms.RandomSolarize(1, p=0.2),
-            # img is already normalized as input to STN; bound = 1 if img.is_floating_point() else 255
+            transforms.RandomSolarize(0.5, p=0.2),
             normalize,
             transforms.ConvertImageDtype(torch.float32),
         ])
@@ -981,7 +962,6 @@ class ColorAugmentation(object):
             transforms.RandomGrayscale(p=0.2),
             transforms.RandomApply([gaussian_blur], p=0.5),
             normalize,
-            transforms.ConvertImageDtype(torch.float32),
         ])
 
     def __call__(self, images):
@@ -989,6 +969,63 @@ class ColorAugmentation(object):
         for img in images[2:]:
             crops.append(self.transform_local(img))
         return crops
+
+
+def gradient_norm(model):
+    parameters = [p for p in model.parameters() if p.grad is not None and p.requires_grad]
+    if parameters:
+        return torch.stack([p.grad.detach().data.norm(2) for p in parameters]).data.norm(2).item()
+    return 0.
+
+
+def print_gradients(stn):
+    print("==========================================================================================\n"
+          "###                           STN WEIGHTS AND GRADIENTS                                ###\n"
+          "==========================================================================================\n")
+    print("GLOBAL HEAD BIAS.DATA:")
+    print(stn.module.transform_net.localization_net.heads[0].linear2.bias.data.cpu().numpy())
+    print()
+    print("GLOBAL HEAD BIAS.GRAD:")
+    print(stn.module.transform_net.localization_net.heads[0].linear2.bias.grad.cpu().numpy())
+    print()
+    print("LOCAL HEAD BIAS.DATA:")
+    print(stn.module.transform_net.localization_net.heads[2].linear2.bias.data.cpu().numpy())
+    print()
+    print("LOCAL HEAD BIAS.GRAD:")
+    print(stn.module.transform_net.localization_net.heads[2].linear2.bias.grad.cpu().numpy())
+    print()
+    print("GRADIENT NORM:")
+    print(gradient_norm(stn))
+    print("==========================================================================================\n"
+          "###                                        END                                         ###\n"
+          "==========================================================================================")
+
+
+class SummaryWriterCustom(SummaryWriter):
+    def __init__(self, log_dir, plot_size):
+        super().__init__(log_dir=log_dir)
+        self.plot_size = plot_size
+        matplotlib.use('Agg')
+
+    def write_image_grid(self, tag, images, original_images, epoch, global_step):
+        fig = image_grid(images=images, original_images=original_images, epoch=epoch, plot_size=self.plot_size)
+        self.add_figure(tag, fig, global_step=global_step)
+
+    def write_theta_heatmap(self, tag, theta, epoch, global_step):
+        fig = theta_heatmap(theta, epoch)
+        self.add_figure(tag, fig, global_step=global_step)
+
+
+def summary_writer_write_images_thetas(summary_writer, stn_images, images, thetas, epoch, it):
+    theta_g1 = thetas[0][0].cpu().detach().numpy()
+    theta_g2 = thetas[1][0].cpu().detach().numpy()
+    theta_l1 = thetas[2][0].cpu().detach().numpy()
+    theta_l2 = thetas[3][0].cpu().detach().numpy()
+    summary_writer.write_image_grid(tag="images", images=stn_images, original_images=images, epoch=epoch, global_step=it)
+    summary_writer.write_theta_heatmap(tag="theta_g1", theta=theta_g1, epoch=epoch, global_step=it)
+    summary_writer.write_theta_heatmap(tag="theta_g2", theta=theta_g2, epoch=epoch, global_step=it)
+    summary_writer.write_theta_heatmap(tag="theta_l1", theta=theta_l1, epoch=epoch, global_step=it)
+    summary_writer.write_theta_heatmap(tag="theta_l2", theta=theta_l2, epoch=epoch, global_step=it)
 
 
 def image_grid(images, original_images, epoch, plot_size=16):
@@ -1031,38 +1068,6 @@ def theta_heatmap(theta, epoch):
     sns.heatmap(theta, annot=True)
     ax.set_title(f'Theta @ {epoch} epoch')
     return figure
-
-
-class SummaryWriterCustom(SummaryWriter):
-    def __init__(self, log_dir, plot_size):
-        super().__init__(log_dir=log_dir)
-        self.plot_size = plot_size
-        matplotlib.use('Agg')
-
-    def write_image_grid(self, tag, images, original_images, epoch, global_step):
-        fig = image_grid(images=images, original_images=original_images, epoch=epoch, plot_size=self.plot_size)
-        self.add_figure(tag, fig, global_step=global_step)
-
-    def write_theta_heatmap(self, tag, theta, epoch, global_step):
-        fig = theta_heatmap(theta, epoch)
-        self.add_figure(tag, fig, global_step=global_step)
-
-
-def summary_writer_write_images_thetas(summary_writer, stn_images, images, thetas, epoch, it):
-    theta_g1 = thetas[0][0].cpu().detach().numpy()
-    theta_g2 = thetas[1][0].cpu().detach().numpy()
-    theta_l1 = thetas[2][0].cpu().detach().numpy()
-    theta_l2 = thetas[3][0].cpu().detach().numpy()
-    summary_writer.write_image_grid(tag="images", images=stn_images, original_images=images, epoch=epoch, global_step=it)
-    summary_writer.write_theta_heatmap(tag="theta_g1", theta=theta_g1, epoch=epoch, global_step=it)
-    summary_writer.write_theta_heatmap(tag="theta_g2", theta=theta_g2, epoch=epoch, global_step=it)
-    summary_writer.write_theta_heatmap(tag="theta_l1", theta=theta_l1, epoch=epoch, global_step=it)
-    summary_writer.write_theta_heatmap(tag="theta_l2", theta=theta_l2, epoch=epoch, global_step=it)
-
-    theta_g_euc_norm = np.linalg.norm(np.double(theta_g2 - theta_g1), 2)
-    theta_l_euc_norm = np.linalg.norm(np.double(theta_l2 - theta_l1), 2)
-    summary_writer.add_scalar(tag="theta local eucl. norm.", scalar_value=theta_l_euc_norm, global_step=it)
-    summary_writer.add_scalar(tag="theta global eucl. norm.", scalar_value=theta_g_euc_norm, global_step=it)
 
 
 """
@@ -1112,9 +1117,7 @@ class DataAugmentationDINO(object):
         ])
 
     def __call__(self, image):
-        crops = []
-        crops.append(self.global_transfo1(image))
-        crops.append(self.global_transfo2(image))
+        crops = [self.global_transfo1(image), self.global_transfo2(image)]
         for _ in range(self.local_crops_number):
             crops.append(self.local_transfo(image))
         return crops

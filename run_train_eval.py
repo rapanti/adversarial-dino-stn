@@ -124,9 +124,9 @@ parser.add_argument("--stn_lr", default=5e-4, type=float, help="""Learning rate 
     with the batch size, and specified here for a reference batch size of 256.""")
 parser.add_argument("--separate_localization_net", default=False, type=utils.bool_flag,
                     help="Set this flag to use a separate localization network for each head.")
-parser.add_argument("--summary_writer_freq", default=1e6, type=int,
+parser.add_argument("--summary_writer_freq", default=0, type=int,
                     help="Defines the number of iterations the summary writer will write output.")
-parser.add_argument("--grad_check_freq", default=1e6, type=int,
+parser.add_argument("--grad_check_freq", default=0, type=int,
                     help="Defines the number of iterations the current tensor grad of the global 1 localization head is printed to stdout.")
 parser.add_argument("--stn_res", default=(224, 96), type=int, nargs='+',
                     help="Set the resolution of the global and local crops of the STN (default: 224x and 96x)")
@@ -140,9 +140,7 @@ parser.add_argument("--stn_conv2_depth", default=32, type=int,
                     help="Specifies the number of feature maps of conv2 for the STN localization network (default: 32).")
 parser.add_argument("--stn_theta_norm", default=False, type=utils.bool_flag,
                     help="Set this flag to normalize 'theta' in the STN before passing to affine_grid(theta, ...). Fixes the problem with cropping of the images (black regions)")
-parser.add_argument("--use_stn_penalty", default=False, type=utils.bool_flag,
-                    help="Set this flag to add a penalty term to the loss. Similarity between input and output image of STN.")
-parser.add_argument("--penalty_loss", default="ThetaLoss", type=str, choices=penalty_list,
+parser.add_argument("--stn_penalty", default=None, type=str, choices=penalty_list,
                     help="Specify the name of the similarity to use.")
 parser.add_argument("--epsilon", default=1., type=float,
                     help="Scalar for the penalty loss. Rescales the gradient by multiplication.")

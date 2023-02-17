@@ -175,9 +175,7 @@ def get_args_parser():
                         help="Specifies the number of feature maps of conv2 for the STN localization network (default: 32).")
     parser.add_argument("--stn_theta_norm", default=False, type=utils.bool_flag,
                         help="Set this flag to normalize 'theta' in the STN before passing to affine_grid(theta, ...). Fixes the problem with cropping of the images (black regions)")
-    parser.add_argument("--use_stn_penalty", default=False, type=utils.bool_flag,
-                        help="Set this flag to add a penalty term to the loss. Similarity between input and output image of STN.")
-    parser.add_argument("--penalty_loss", default="ThetaLoss", type=str, choices=penalty_list,
+    parser.add_argument("--stn_penalty", default=None, type=str, choices=penalty_list,
                         help="Specify the name of the similarity to use.")
     parser.add_argument("--epsilon", default=1., type=float,
                         help="Scalar for the penalty loss. Rescales the gradient by multiplication.")
@@ -312,7 +310,7 @@ def train_dino(args):
         args.epochs,
     ).cuda()
 
-    stn_penalty = penalty_dict[args.penalty_loss](
+    stn_penalty = penalty_dict[args.stn_penalty](
         invert=args.invert_penalty,
         eps=args.epsilon,
         target=args.penalty_target,
@@ -323,7 +321,7 @@ def train_dino(args):
         resolution=32,
         exponent=2,
         bins=100,
-    ).cuda() if args.use_stn_penalty else None
+    ).cuda() if args.stn_penalty else None
 
     # ============ preparing optimizer ... ============
     params_groups = utils.get_params_groups(student)
@@ -385,7 +383,7 @@ def train_dino(args):
     print(f"Loss, optimizer and schedulers ready.")
 
     # ============ ColorAugments after STN ============
-    color_augment = utils.ColorAugmentation(args.local_crops_number, args.dataset) if args.stn_color_augment else None
+    color_augment = utils.ColorAugmentation(args.dataset) if args.stn_color_augment else None
 
     # ============ optionally resume training ... ============
     to_restore = {"epoch": 0}
@@ -431,7 +429,7 @@ def train_dino(args):
         if fp16_scaler is not None:
             save_dict['fp16_scaler'] = fp16_scaler.state_dict()
         utils.save_on_master(save_dict, os.path.join(args.output_dir, 'checkpoint.pth'))
-        if args.saveckp_freq and epoch % args.saveckp_freq == 0:
+        if epoch and args.saveckp_freq and epoch % args.saveckp_freq == 0:
             utils.save_on_master(save_dict, os.path.join(args.output_dir, f'checkpoint{epoch:04}.pth'))
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                      'epoch': epoch}
@@ -447,7 +445,7 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
                     optimizer, lr_schedule, wd_schedule, momentum_schedule,
                     epoch, fp16_scaler, args, summary_writer,
                     stn, stn_optimizer, stn_lr_schedule, stn_penalty, color_augment):
-    metric_logger = utils.MetricLogger(delimiter="  ")
+    metric_logger = utils.MetricLogger(delimiter=" ")
     header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
     for it, (images, _) in enumerate(metric_logger.log_every(data_loader, 10, header)):
         # update weight decay and learning rate according to their schedule
@@ -470,15 +468,16 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
         # teacher and student forward passes + compute dino loss
         with torch.cuda.amp.autocast(fp16_scaler is not None):
             stn_images, thetas = stn(images)
+
             penalty = torch.tensor(0.).cuda()
             if stn_penalty:
                 penalty = stn_penalty(images=stn_images, target=images, thetas=thetas)
 
+            if utils.is_main_process() and args.summary_writer_freq and it % args.summary_writer_freq == 0:
+                utils.summary_writer_write_images_thetas(summary_writer, stn_images, images, thetas, epoch, it)
+
             if color_augment:
                 stn_images = color_augment(stn_images)
-
-            if utils.is_main_process() and it % args.summary_writer_freq == 0:
-                utils.summary_writer_write_images_thetas(summary_writer, stn_images, images, thetas, epoch, it)
 
             teacher_output = teacher(stn_images[:2])  # only the 2 global views pass through the teacher
             student_output = student(stn_images)
@@ -495,11 +494,14 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
 
         # student update
         optimizer.zero_grad()
+        if stn_optimizer:
+            stn_optimizer.zero_grad()
         param_norms = None
         if fp16_scaler is None:
             loss.backward()
             if args.clip_grad:
-                param_norms = utils.clip_gradients(student, args.clip_grad)
+                torch.nn.utils.clip_grad_norm_(student.parameters(), args.clip_grad)
+                param_norms = torch.nn.utils.clip_grad_norm_(stn.parameters(), args.clip_grad)
             utils.cancel_gradients_last_layer(epoch, student, args.freeze_last_layer)
             optimizer.step()
             if stn_optimizer:
@@ -508,7 +510,8 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
             fp16_scaler.scale(loss).backward()
             if args.clip_grad:
                 fp16_scaler.unscale_(optimizer)  # unscale the gradients of optimizer's assigned params in-place
-                param_norms = utils.clip_gradients(student, args.clip_grad)
+                torch.nn.utils.clip_grad_norm_(student.parameters(), args.clip_grad)
+                param_norms = torch.nn.utils.clip_grad_norm_(stn.parameters(), args.clip_grad)
             utils.cancel_gradients_last_layer(epoch, student, args.freeze_last_layer)
             fp16_scaler.step(optimizer)
             if stn_optimizer:
@@ -531,20 +534,27 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
             metric_logger.update(penalty=penalty.item())
         if stn_optimizer:
             metric_logger.update(lrstn=stn_optimizer.param_groups[0]["lr"])
+        metric_logger.update(norms=param_norms)
 
         if utils.is_main_process():
             summary_writer.add_scalar(tag="loss", scalar_value=loss.item(), global_step=it)
             summary_writer.add_scalar(tag="lr", scalar_value=optimizer.param_groups[0]["lr"], global_step=it)
             summary_writer.add_scalar(tag="weight decay", scalar_value=optimizer.param_groups[0]["weight_decay"], global_step=it)
-            if args.use_stn_penalty:
+            summary_writer.add_scalar(tag="grad norm (stn)", scalar_value=param_norms, global_step=it)
+            if stn_penalty:
                 summary_writer.add_scalar(tag="dino", scalar_value=dino.item(), global_step=it)
                 summary_writer.add_scalar(tag="penalty", scalar_value=penalty.item(), global_step=it)
             if stn_optimizer:
                 summary_writer.add_scalar(tag="lr stn", scalar_value=stn_optimizer.param_groups[0]["lr"], global_step=it)
+            if it % 10 == 0:
+                scale = torch.stack([torch.det(theta[:, :, :2].float()).abs().mean() for theta in thetas[:2]]).mean()
+                summary_writer.add_scalar(tag="scale global", scalar_value=scale.item(), global_step=it)
+                scale = torch.stack([torch.det(theta[:, :, :2].float()).abs().mean() for theta in thetas[2:]]).mean()
+                summary_writer.add_scalar(tag="scale local", scalar_value=scale.item(), global_step=it)
 
         # Print gradients to STDOUT
-        if utils.is_main_process() and it % args.grad_check_freq == 0:
-            utils.print_gradients(stn, args)
+        if utils.is_main_process() and args.grad_check_freq and it % args.grad_check_freq == 1:
+            utils.print_gradients(stn)
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
