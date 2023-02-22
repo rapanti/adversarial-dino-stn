@@ -244,7 +244,7 @@ def train_dino(args):
     else:
         print(f"Unknown architecture: {args.arch}")
 
-    transform_net = STN(
+    stn = STN(
         mode=args.stn_mode,
         invert_gradients=args.invert_stn_gradients,
         separate_localization_net=args.separate_localization_net,
@@ -257,10 +257,10 @@ def train_dino(args):
         resolution=args.stn_res,
         unbounded_stn=args.use_unbounded_stn,
     )
-    stn = AugmentationNetwork(
-        transform_net=transform_net,
-        resize_input=args.resize_input,
-        resize_size=args.resize_size,
+
+    conv5x3 = nn.Sequential(
+        nn.Conv2d(5, 3, 1),
+        nn.BatchNorm2d(3),
     )
 
     # multi-crop wrapper handles forward with inputs of different resolutions
@@ -275,7 +275,7 @@ def train_dino(args):
         DINOHead(embed_dim, args.out_dim, args.use_bn_in_head),
     )
     # move networks to gpu
-    student, teacher, stn = student.cuda(), teacher.cuda(), stn.cuda()
+    student, teacher, stn, conv5x3 = student.cuda(), teacher.cuda(), stn.cuda(), conv5x3.cuda()
 
     # synchronize batch norms (if any)
     if utils.has_batchnorms(student):
@@ -290,6 +290,9 @@ def train_dino(args):
         teacher_without_ddp = teacher
     if utils.has_batchnorms(stn):
         stn = nn.SyncBatchNorm.convert_sync_batchnorm(stn)
+
+    if utils.has_batchnorms(conv5x3):
+        conv5x3 = nn.SyncBatchNorm.convert_sync_batchnorm(conv5x3)
 
     student = nn.parallel.DistributedDataParallel(student, device_ids=[args.gpu])
     stn = nn.parallel.DistributedDataParallel(stn, device_ids=[args.gpu])
@@ -340,6 +343,8 @@ def train_dino(args):
         student_params = params_groups[1]['params']
         all_params = student_params + list(stn.parameters())
         params_groups[1]['params'] = all_params
+
+    params_groups.append({"params": conv5x3.parameters()})
 
     if args.optimizer == "adamw":
         optimizer = torch.optim.AdamW(params_groups)  # to use with ViTs
@@ -397,6 +402,7 @@ def train_dino(args):
         dino_loss=dino_loss,
         stn=stn,
         stn_optimizer=stn_optimizer,
+        conv5x3=conv5x3,
     )
     start_epoch = to_restore["epoch"]
 
@@ -413,7 +419,8 @@ def train_dino(args):
         train_stats = train_one_epoch(student, teacher, teacher_without_ddp, dino_loss,
                                       data_loader, optimizer, lr_schedule, wd_schedule, momentum_schedule,
                                       epoch, fp16_scaler, args, summary_writer,
-                                      stn, stn_optimizer, stn_lr_schedule, stn_penalty, color_augment)
+                                      stn, stn_optimizer, stn_lr_schedule, stn_penalty, color_augment,
+                                      conv5x3)
 
         # ============ writing logs ... ============
         save_dict = {
@@ -425,6 +432,7 @@ def train_dino(args):
             'dino_loss': dino_loss.state_dict(),
             'stn': stn.state_dict(),
             'stn_optimizer': stn_optimizer.state_dict() if stn_optimizer else None,
+            'conv5x3': conv5x3.state_dict(),
         }
         if fp16_scaler is not None:
             save_dict['fp16_scaler'] = fp16_scaler.state_dict()
@@ -444,7 +452,8 @@ def train_dino(args):
 def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loader,
                     optimizer, lr_schedule, wd_schedule, momentum_schedule,
                     epoch, fp16_scaler, args, summary_writer,
-                    stn, stn_optimizer, stn_lr_schedule, stn_penalty, color_augment):
+                    stn, stn_optimizer, stn_lr_schedule, stn_penalty, color_augment,
+                    conv5x3):
     metric_logger = utils.MetricLogger(delimiter=" ")
     header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
     for it, (images, _) in enumerate(metric_logger.log_every(data_loader, 10, header)):
@@ -467,7 +476,7 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
 
         # teacher and student forward passes + compute dino loss
         with torch.cuda.amp.autocast(fp16_scaler is not None):
-            stn_images, thetas = stn(images)
+            stn_images, thetas, grids = stn(images)
 
             penalty = torch.tensor(0.).cuda()
             if stn_penalty:
@@ -479,17 +488,22 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
             if color_augment:
                 stn_images = color_augment(stn_images)
 
+            grids = [grid.permute(0, 3, 1, 2) for grid in grids]
+            stn_images = [torch.cat((img, grid), dim=1) for img, grid in zip(stn_images, grids)]
+
+            stn_images = [conv5x3(img) for img in stn_images]
+
             teacher_output = teacher(stn_images[:2])  # only the 2 global views pass through the teacher
             student_output = student(stn_images)
             dino = dino_loss(student_output, teacher_output, epoch)
             loss = dino + penalty
 
         if not math.isfinite(penalty.item()):
-            print("Penalty is {}, stopping training".format(loss.item()), force=True)
+            print("Penalty is {}, stopping training".format(penalty.item()), force=True)
             sys.exit(2)
 
         if not math.isfinite(dino.item()):
-            print("DINOLoss is {}, stopping training".format(loss.item()), force=True)
+            print("DINOLoss is {}, stopping training".format(dino.item()), force=True)
             sys.exit(2)
 
         # student update
