@@ -28,6 +28,7 @@ import torch.backends.cudnn as cudnn
 import torch.nn.functional as F
 from torch.utils.data import DistributedSampler, DataLoader
 from torchvision import models as torchvision_models
+from torchvision.transforms.functional import resize
 
 import utils
 import vision_transformer as vits
@@ -244,7 +245,7 @@ def train_dino(args):
     else:
         print(f"Unknown architecture: {args.arch}")
 
-    transform_net = STN(
+    stn = STN(
         mode=args.stn_mode,
         invert_gradients=args.invert_stn_gradients,
         separate_localization_net=args.separate_localization_net,
@@ -257,10 +258,19 @@ def train_dino(args):
         resolution=args.stn_res,
         unbounded_stn=args.use_unbounded_stn,
     )
-    stn = AugmentationNetwork(
-        transform_net=transform_net,
-        resize_input=args.resize_input,
-        resize_size=args.resize_size,
+
+    stn_teacher = STN(
+        mode=args.stn_mode,
+        invert_gradients=args.invert_stn_gradients,
+        separate_localization_net=args.separate_localization_net,
+        conv1_depth=args.stn_conv1_depth,
+        conv2_depth=args.stn_conv2_depth,
+        theta_norm=args.stn_theta_norm,
+        local_crops_number=args.local_crops_number,
+        global_crops_scale=args.global_crops_scale,
+        local_crops_scale=args.local_crops_scale,
+        resolution=args.stn_res,
+        unbounded_stn=args.use_unbounded_stn,
     )
 
     # multi-crop wrapper handles forward with inputs of different resolutions
@@ -275,7 +285,7 @@ def train_dino(args):
         DINOHead(embed_dim, args.out_dim, args.use_bn_in_head),
     )
     # move networks to gpu
-    student, teacher, stn = student.cuda(), teacher.cuda(), stn.cuda()
+    student, teacher, stn, stn_teacher = student.cuda(), teacher.cuda(), stn.cuda(), stn_teacher.cuda()
 
     # synchronize batch norms (if any)
     if utils.has_batchnorms(student):
@@ -290,13 +300,21 @@ def train_dino(args):
         teacher_without_ddp = teacher
     if utils.has_batchnorms(stn):
         stn = nn.SyncBatchNorm.convert_sync_batchnorm(stn)
+        stn_teacher = nn.SyncBatchNorm.convert_sync_batchnorm(stn_teacher)
+        stn_teacher = nn.parallel.DistributedDataParallel(stn_teacher, device_ids=[args.gpu])
+        stn_teacher_without_ddp = stn_teacher.module
+    else:
+        stn_teacher_without_ddp = stn_teacher
 
     student = nn.parallel.DistributedDataParallel(student, device_ids=[args.gpu])
     stn = nn.parallel.DistributedDataParallel(stn, device_ids=[args.gpu])
     # teacher and student start with the same weights
     teacher_without_ddp.load_state_dict(student.module.state_dict())
+    stn_teacher_without_ddp.load_state_dict(stn.module.state_dict())
     # there is no backpropagation through the teacher, so no need for gradients
     for p in teacher.parameters():
+        p.requires_grad = False
+    for p in stn_teacher.parameters():
         p.requires_grad = False
     print(f"Student and Teacher are built: they are both {args.arch} network.")
 
@@ -304,6 +322,14 @@ def train_dino(args):
     dino_loss = DINOLoss(
         args.out_dim,
         args.local_crops_number + 2,  # total number of crops = 2 global crops + local_crops_number
+        args.warmup_teacher_temp,
+        args.teacher_temp,
+        args.warmup_teacher_temp_epochs,
+        args.epochs,
+    ).cuda()
+
+    stn_loss = STNDinoLoss(
+        3 * 32 ** 2,
         args.warmup_teacher_temp,
         args.teacher_temp,
         args.warmup_teacher_temp_epochs,
@@ -397,6 +423,7 @@ def train_dino(args):
         dino_loss=dino_loss,
         stn=stn,
         stn_optimizer=stn_optimizer,
+        stn_loss=stn_loss,
     )
     start_epoch = to_restore["epoch"]
 
@@ -413,7 +440,8 @@ def train_dino(args):
         train_stats = train_one_epoch(student, teacher, teacher_without_ddp, dino_loss,
                                       data_loader, optimizer, lr_schedule, wd_schedule, momentum_schedule,
                                       epoch, fp16_scaler, args, summary_writer,
-                                      stn, stn_optimizer, stn_lr_schedule, stn_penalty, color_augment)
+                                      stn, stn_optimizer, stn_lr_schedule, stn_penalty, color_augment,
+                                      stn_teacher, stn_teacher_without_ddp, stn_loss)
 
         # ============ writing logs ... ============
         save_dict = {
@@ -425,6 +453,7 @@ def train_dino(args):
             'dino_loss': dino_loss.state_dict(),
             'stn': stn.state_dict(),
             'stn_optimizer': stn_optimizer.state_dict() if stn_optimizer else None,
+            'stn_loss': stn_loss.state_dict(),
         }
         if fp16_scaler is not None:
             save_dict['fp16_scaler'] = fp16_scaler.state_dict()
@@ -444,7 +473,8 @@ def train_dino(args):
 def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loader,
                     optimizer, lr_schedule, wd_schedule, momentum_schedule,
                     epoch, fp16_scaler, args, summary_writer,
-                    stn, stn_optimizer, stn_lr_schedule, stn_penalty, color_augment):
+                    stn, stn_optimizer, stn_lr_schedule, stn_penalty, color_augment,
+                    stn_teacher, stn_teacher_without_ddp, stn_loss):
     metric_logger = utils.MetricLogger(delimiter=" ")
     header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
     for it, (images, _) in enumerate(metric_logger.log_every(data_loader, 10, header)):
@@ -468,6 +498,8 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
         # teacher and student forward passes + compute dino loss
         with torch.cuda.amp.autocast(fp16_scaler is not None):
             stn_images, thetas = stn(images)
+            teacher_images, _ = stn_teacher(images)
+            stn_los = stn_loss(stn_images, teacher_images, epoch)
 
             penalty = torch.tensor(0.).cuda()
             if stn_penalty:
@@ -482,14 +514,18 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
             teacher_output = teacher(stn_images[:2])  # only the 2 global views pass through the teacher
             student_output = student(stn_images)
             dino = dino_loss(student_output, teacher_output, epoch)
-            loss = dino + penalty
+            loss = dino + penalty + stn_los
+
+        if not math.isfinite(stn_los.item()):
+            print("STNLoss is {}, stopping training".format(stn_los.item()), force=True)
+            sys.exit(2)
 
         if not math.isfinite(penalty.item()):
-            print("Penalty is {}, stopping training".format(loss.item()), force=True)
+            print("Penalty is {}, stopping training".format(penalty.item()), force=True)
             sys.exit(2)
 
         if not math.isfinite(dino.item()):
-            print("DINOLoss is {}, stopping training".format(loss.item()), force=True)
+            print("DINOLoss is {}, stopping training".format(dino.item()), force=True)
             sys.exit(2)
 
         # student update
@@ -522,6 +558,11 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
         with torch.no_grad():
             m = momentum_schedule[it]  # momentum parameter
             for param_q, param_k in zip(student.module.parameters(), teacher_without_ddp.parameters()):
+                param_k.data.mul_(m).add_((1 - m) * param_q.detach().data)
+
+        with torch.no_grad():
+            m = momentum_schedule[it]  # momentum parameter
+            for param_q, param_k in zip(stn.module.parameters(), stn_teacher_without_ddp.parameters()):
                 param_k.data.mul_(m).add_((1 - m) * param_q.detach().data)
 
         # logging
@@ -611,6 +652,63 @@ class DINOLoss(nn.Module):
         Update center used for teacher output.
         """
         batch_center = torch.sum(teacher_output, dim=0, keepdim=True)
+        dist.all_reduce(batch_center)
+        batch_center = batch_center / (len(teacher_output) * dist.get_world_size())
+
+        # ema update
+        self.center = self.center * self.center_momentum + batch_center * (1 - self.center_momentum)
+
+
+class STNDinoLoss(nn.Module):
+    def __init__(self, out_dim, warmup_teacher_temp, teacher_temp,
+                 warmup_teacher_temp_epochs, nepochs, student_temp=0.1,
+                 center_momentum=0.9):
+        super().__init__()
+        self.student_temp = student_temp
+        self.center_momentum = center_momentum
+        self.register_buffer("center", torch.zeros(1, out_dim))
+        # we apply a warm-up for the teacher temperature because
+        # a too high temperature makes the training unstable at the beginning
+        self.teacher_temp_schedule = np.concatenate((
+            np.linspace(warmup_teacher_temp,
+                        teacher_temp, warmup_teacher_temp_epochs),
+            np.ones(nepochs - warmup_teacher_temp_epochs) * teacher_temp
+        ))
+
+    def forward(self, student_output, teacher_output, epoch):
+        """
+        Cross-entropy between softmax outputs of the teacher and student networks.
+        """
+        student_output = student_output[:2] + [resize(stud_out, [32, ]) for stud_out in student_output[2:]]
+        student_output = [stud_out.flatten(1) for stud_out in student_output]
+        student_out = [stud_out / self.student_temp for stud_out in student_output]
+
+        # teacher centering and sharpening
+        temp = self.teacher_temp_schedule[epoch]
+        teacher_output = teacher_output[:2] + [resize(teach_out, [32, ]) for teach_out in teacher_output[2:]]
+        teacher_output = [teach_out.flatten(1) for teach_out in teacher_output]
+        teacher_out = [F.softmax((teacher_out - self.center) / temp, dim=1).detach() for teacher_out in teacher_output]
+
+        total_loss = 0
+        n_loss_terms = 0
+        for iq, q in enumerate(teacher_out):
+            for v in range(len(student_out)):
+                if v == iq:
+                    # we skip cases where student and teacher operate on the same view
+                    continue
+                loss = torch.sum(-q * F.log_softmax(student_out[v], dim=-1), dim=-1)
+                total_loss += loss.mean()
+                n_loss_terms += 1
+        total_loss /= n_loss_terms
+        self.update_center(teacher_output)
+        return total_loss
+
+    @torch.no_grad()
+    def update_center(self, teacher_output):
+        """
+        Update center used for teacher output.
+        """
+        batch_center = torch.stack(teacher_output, dim=0).sum(dim=0, keepdim=True)
         dist.all_reduce(batch_center)
         batch_center = batch_center / (len(teacher_output) * dist.get_world_size())
 
