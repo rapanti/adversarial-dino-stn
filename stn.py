@@ -193,14 +193,16 @@ class STN(nn.Module):
 
         align_corners = True
         crops = []
+        grids = []
         resolutions = [[self.global_res, self.global_res]] * 2 + \
                       [[self.local_res, self.local_res]] * self.local_crops_number
         for theta, res in zip(thetas, resolutions):
             grid = F.affine_grid(theta, size=list(x.size()[:2]) + res, align_corners=align_corners)
+            grids.append(grid)
             crop = F.grid_sample(x, grid, align_corners=align_corners)
             crops.append(crop)
 
-        return crops, thetas
+        return crops, thetas, grids
 
 
 class AugmentationNetwork(nn.Module):

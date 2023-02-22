@@ -25,6 +25,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from torchvision import datasets, transforms
 from torchvision.transforms import InterpolationMode
+from torch.utils.data import Dataset, DataLoader
 
 import utils
 import vision_transformer as vits
@@ -45,6 +46,7 @@ def eval_linear(args, dist_inited=False):
         model = vits.__dict__[args.arch](
             img_size=args.img_size,
             patch_size=args.patch_size,
+            in_chans=5,
             num_classes=0)
         embed_dim = model.embed_dim * (args.n_last_blocks + int(args.avgpool_patchtokens))
     # if the network is a XCiT
@@ -88,9 +90,6 @@ def eval_linear(args, dist_inited=False):
                                       args.avgpool_patchtokens)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
         return
-
-    if args.pretrained_linear_weights:
-        utils.load_pretrained_linear_weights(linear_classifier, args.pretrained_linear_weights)
 
     dataset_train, args.num_labels = build_dataset(is_train=True, args=args)
     sampler = torch.utils.data.distributed.DistributedSampler(dataset_train)
@@ -277,10 +276,32 @@ class LinearClassifier(nn.Module):
         return self.linear(x)
 
 
+class CIFAR10wGrid(Dataset):
+    def __init__(self, cifar10, transform):
+        self.cifar10 = cifar10
+        self.theta = torch.tensor([[[1, 0, 0], [0, 1, 0]]], dtype=torch.float)
+        self.grid = nn.functional.affine_grid(self.theta, [1, 1, 32, 32], True).permute(0, 3, 1, 2).squeeze()
+        self.tensor = transforms.ToTensor()
+        self.norm = transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.cifar10)
+
+    def __getitem__(self, item):
+        sample, label = self.cifar10.__getitem__(item)
+        sample = self.norm(self.tensor(sample))
+        sample = torch.cat((sample, self.grid), dim=0)
+        if self.transform:
+            sample = self.transform(sample)
+        return sample, label
+
+
 def build_dataset(is_train, args):
     transform = build_transform(is_train, args)
     if args.dataset == 'CIFAR10':
-        return datasets.CIFAR10(args.data_path, download=True, train=is_train, transform=transform), 10
+        cifar = datasets.CIFAR10(args.data_path, download=True, train=is_train)
+        return CIFAR10wGrid(cifar, transform), 10
     if args.dataset == 'CIFAR100':
         return datasets.CIFAR100(args.data_path, download=True, train=is_train, transform=transform), 100
     elif args.dataset == 'ImageNet':
@@ -301,13 +322,13 @@ def build_transform(is_train, args):
             return transforms.Compose([
                 transforms.RandomResizedCrop(args.img_size),
                 transforms.RandomHorizontalFlip(),
-                normalize,
+                # normalize,
             ])
         factor = args.img_size // 32
         return transforms.Compose([
-            transforms.Resize(args.img_size + factor * 4, interpolation=InterpolationMode.BICUBIC),
+            transforms.Resize(args.img_size + factor * 4),
             transforms.CenterCrop(args.img_size),
-            normalize,
+            # normalize,
         ])
     if args.dataset == 'ImageNet':
         normalize = transforms.Compose([

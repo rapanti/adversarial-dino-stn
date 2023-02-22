@@ -226,9 +226,10 @@ def train_dino(args):
         student = vits.__dict__[args.arch](
             img_size=args.img_size,
             patch_size=args.patch_size,
+            in_chans=5,
             drop_path_rate=args.drop_path_rate,  # stochastic depth
         )
-        teacher = vits.__dict__[args.arch](img_size=args.img_size, patch_size=args.patch_size)
+        teacher = vits.__dict__[args.arch](img_size=args.img_size, patch_size=args.patch_size, in_chans=5)
         embed_dim = student.embed_dim
     # if the network is a XCiT
     elif args.arch in torch.hub.list("facebookresearch/xcit:main"):
@@ -467,7 +468,7 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
 
         # teacher and student forward passes + compute dino loss
         with torch.cuda.amp.autocast(fp16_scaler is not None):
-            stn_images, thetas = stn(images)
+            stn_images, thetas, grids = stn(images)
 
             penalty = torch.tensor(0.).cuda()
             if stn_penalty:
@@ -478,6 +479,9 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
 
             if color_augment:
                 stn_images = color_augment(stn_images)
+
+            grids = [grid.permute(0, 3, 1, 2) for grid in grids]
+            stn_images = [torch.cat((img, grid), dim=1) for img, grid in zip(stn_images, grids)]
 
             teacher_output = teacher(stn_images[:2])  # only the 2 global views pass through the teacher
             student_output = student(stn_images)
