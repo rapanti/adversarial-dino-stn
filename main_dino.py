@@ -244,7 +244,7 @@ def train_dino(args):
     else:
         print(f"Unknown architecture: {args.arch}")
 
-    transform_net = STN(
+    stn = STN(
         mode=args.stn_mode,
         invert_gradients=args.invert_stn_gradients,
         separate_localization_net=args.separate_localization_net,
@@ -256,11 +256,6 @@ def train_dino(args):
         local_crops_scale=args.local_crops_scale,
         resolution=args.stn_res,
         unbounded_stn=args.use_unbounded_stn,
-    )
-    stn = AugmentationNetwork(
-        transform_net=transform_net,
-        resize_input=args.resize_input,
-        resize_size=args.resize_size,
     )
 
     # multi-crop wrapper handles forward with inputs of different resolutions
@@ -485,11 +480,11 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
             loss = dino + penalty
 
         if not math.isfinite(penalty.item()):
-            print("Penalty is {}, stopping training".format(loss.item()), force=True)
+            print("Penalty is {}, stopping training".format(penalty.item()), force=True)
             sys.exit(2)
 
         if not math.isfinite(dino.item()):
-            print("DINOLoss is {}, stopping training".format(loss.item()), force=True)
+            print("DINOLoss is {}, stopping training".format(dino.item()), force=True)
             sys.exit(2)
 
         # student update
@@ -523,6 +518,12 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
             m = momentum_schedule[it]  # momentum parameter
             for param_q, param_k in zip(student.module.parameters(), teacher_without_ddp.parameters()):
                 param_k.data.mul_(m).add_((1 - m) * param_q.detach().data)
+
+        with torch.no_grad():
+            m = momentum_schedule[it]  # momentum parameter
+            for param_q, param_k in zip(stn.module.localization_net.backbones.parameters(),
+                                        teacher_without_ddp.parameters()):
+                param_q.data.mul_(m).add_((1 - m) * param_k.detach().data)
 
         # logging
         torch.cuda.synchronize()

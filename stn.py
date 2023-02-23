@@ -3,6 +3,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 from torchvision.transforms.functional import resize
 from utils import grad_reverse
+from vision_transformer import vit_nano
 
 
 N_PARAMS = {
@@ -89,12 +90,12 @@ class LocNet(nn.Module):
         self.invert_gradient = invert_gradient
         self.separate_backbones = separate_backbones
         self.num_heads = num_heads
-        self.feature_dim = conv2 * 8 ** 2
+        self.feature_dim = 192
 
         num_backbones = num_heads if self.separate_backbones else 1
 
         self.backbones = nn.ModuleList(
-            [LocBackbone(conv1, conv2) for _ in range(num_backbones)]
+            [vit_nano(img_size=32, patch_size=4) for _ in range(num_backbones)]
         )
         self.heads = nn.ModuleList(
             [LocHead(self.mode, self.feature_dim) for _ in range(self.num_heads)]
