@@ -485,11 +485,11 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
             loss = dino + penalty
 
         if not math.isfinite(penalty.item()):
-            print("Penalty is {}, stopping training".format(loss.item()), force=True)
+            print("Penalty is {}, stopping training".format(penalty.item()), force=True)
             sys.exit(2)
 
         if not math.isfinite(dino.item()):
-            print("DINOLoss is {}, stopping training".format(loss.item()), force=True)
+            print("DINOLoss is {}, stopping training".format(dino.item()), force=True)
             sys.exit(2)
 
         # student update
