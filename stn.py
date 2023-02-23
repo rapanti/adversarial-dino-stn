@@ -106,6 +106,8 @@ class LocNet(nn.Module):
             outputs = [h(b(x)) for b, h in zip(self.backbones, self.heads)]
         else:
             xs = self.backbones[0](x)
+            if self.invert_gradient:
+                xs = grad_reverse(xs)
             outputs = [head(xs) for head in self.heads]
         if self.invert_gradient:
             outputs = [grad_reverse(theta) for theta in outputs]
