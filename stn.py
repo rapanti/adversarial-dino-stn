@@ -55,11 +55,12 @@ class LocBackbone(nn.Module):
 
 
 class LocHead(nn.Module):
-    def __init__(self, mode, feature_dim: int):
+    def __init__(self, mode, feature_dim: int, invert_gradient: bool):
         super().__init__()
         self.mode = mode
         self.stn_n_params = N_PARAMS[mode]
         self.feature_dim = feature_dim
+        self.invert_gradient = invert_gradient
         self.linear0 = nn.Linear(feature_dim, 128)
         self.linear1 = nn.Linear(128, 64)
         self.linear2 = nn.Linear(64, self.stn_n_params)
@@ -73,6 +74,8 @@ class LocHead(nn.Module):
         xs = F.leaky_relu(self.linear0(xs))
         xs = F.leaky_relu(self.linear1(xs))
         xs = self.linear2(xs)
+        if self.invert_gradient:
+            xs = grad_reverse(xs)
         return xs
 
 
@@ -97,7 +100,7 @@ class LocNet(nn.Module):
             [LocBackbone(conv1, conv2) for _ in range(num_backbones)]
         )
         self.heads = nn.ModuleList(
-            [LocHead(self.mode, self.feature_dim) for _ in range(self.num_heads)]
+            [LocHead(self.mode, self.feature_dim, i % 2) for i in range(self.num_heads)]
         )
 
     def forward(self, x):
@@ -106,8 +109,8 @@ class LocNet(nn.Module):
         else:
             xs = self.backbones[0](x)
             outputs = [head(xs) for head in self.heads]
-        if self.invert_gradient:
-            outputs = [grad_reverse(theta) for theta in outputs]
+        # if self.invert_gradient:
+        #     outputs = [grad_reverse(theta) for theta in outputs]
         return outputs
 
 
