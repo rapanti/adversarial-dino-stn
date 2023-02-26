@@ -36,6 +36,7 @@ parser.add_argument('--momentum_teacher', default=0.996, type=float, help="""Bas
     We recommend setting a higher value with small batches: for example use 0.9995 with batch size of 256.""")
 parser.add_argument('--use_bn_in_head', default=False, type=utils.bool_flag, help="""Whether to use batch
     normalizations in projection head (Default: False)""")
+parser.add_argument("--pretrained_dino", default="", type=str)
 
 # Temperature teacher parameters
 parser.add_argument('--warmup_teacher_temp', default=0.04, type=float, help="""Initial value for the teacher
