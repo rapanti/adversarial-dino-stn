@@ -71,6 +71,7 @@ def get_args_parser():
         We recommend setting a higher value with small batches: for example use 0.9995 with batch size of 256.""")
     parser.add_argument('--use_bn_in_head', default=False, type=utils.bool_flag, help="""Whether to use batch
         normalizations in projection head (Default: False)""")
+    parser.add_argument("--pretrained_dino", default="", type=str)
 
     # Temperature teacher parameters
     parser.add_argument('--warmup_teacher_temp', default=0.04, type=float, help="""Initial value for the teacher
@@ -274,6 +275,17 @@ def train_dino(args):
         teacher,
         DINOHead(embed_dim, args.out_dim, args.use_bn_in_head),
     )
+
+    if args.pretrained_dino:
+        if not os.path.isfile(args.pretrained_dino):
+            print(f'{args.pretrained_dino} not found.')
+            sys.exit(1)
+        print("Found checkpoint at {}".format(args.pretrained_dino))
+        checkpoint = torch.load(args.pretrained_dino, map_location="cpu")
+        key = 'teacher'
+        msg = student.load_state_dict(checkpoint[key], strict=False)
+        print("=> loaded '{}' from checkpoint '{}' with msg {}".format(key, args.pretrained_dino, msg))
+
     # move networks to gpu
     student, teacher, stn = student.cuda(), teacher.cuda(), stn.cuda()
 

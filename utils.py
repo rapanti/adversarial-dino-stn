@@ -954,7 +954,6 @@ class ColorAugmentation(object):
             transforms.RandomApply([gaussian_blur], p=0.1),
             transforms.RandomSolarize(0.5, p=0.2),
             normalize,
-            transforms.ConvertImageDtype(torch.float32),
         ])
 
         self.transform_local = transforms.Compose([
