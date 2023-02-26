@@ -89,9 +89,6 @@ def eval_linear(args, dist_inited=False):
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
         return
 
-    if args.pretrained_linear_weights:
-        utils.load_pretrained_linear_weights(linear_classifier, args.pretrained_linear_weights)
-
     dataset_train, args.num_labels = build_dataset(is_train=True, args=args)
     sampler = torch.utils.data.distributed.DistributedSampler(dataset_train)
     train_loader = torch.utils.data.DataLoader(
