@@ -906,26 +906,26 @@ def build_dataset(is_train, args):
 def build_transform(args):
     if not args.resize_all_inputs and args.dataset == "ImageNet":
         return transforms.Compose([
-                transforms.ToTensor(),
-                # transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
-            ])
+            transforms.ToTensor(),
+            # transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+        ])
     elif args.resize_all_inputs and args.dataset == "ImageNet":
         return transforms.Compose([
-                transforms.Resize(256),
-                transforms.CenterCrop(224),
-                transforms.ToTensor(),
-                # transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
-            ])
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            # transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+        ])
     elif args.dataset == "CIFAR10":
         return transforms.Compose([
-                transforms.ToTensor(),
-                # transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
-            ])
+            transforms.ToTensor(),
+            # transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+        ])
     elif args.dataset == "CIFAR100":
         return transforms.Compose([
-                transforms.ToTensor(),
-                # transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
-            ])
+            transforms.ToTensor(),
+            # transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+        ])
     print(f"Does not support dataset: {args.dataset}")
     sys.exit(1)
 
@@ -941,6 +941,7 @@ class ColorAugmentation(object):
 
         color_jitter = transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1)
         gaussian_blur = transforms.GaussianBlur(3, (0.1, 2.0))
+
         self.transform_global1 = transforms.Compose([
             transforms.RandomApply([color_jitter], p=0.8),
             transforms.RandomGrayscale(p=0.2),
@@ -954,7 +955,6 @@ class ColorAugmentation(object):
             transforms.RandomApply([gaussian_blur], p=0.1),
             transforms.RandomSolarize(0.5, p=0.2),
             normalize,
-            transforms.ConvertImageDtype(torch.float32),
         ])
 
         self.transform_local = transforms.Compose([

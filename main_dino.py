@@ -16,7 +16,6 @@ import os
 import sys
 import datetime
 import time
-import math
 import json
 from pathlib import Path
 
@@ -424,17 +423,17 @@ def train_dino(args):
             'args': args,
             'dino_loss': dino_loss.state_dict(),
             'stn': stn.state_dict(),
-            'stn_optimizer': stn_optimizer.state_dict() if stn_optimizer else None,
         }
+        if stn_optimizer:
+            save_dict['stn_optimizer'] = stn_optimizer.state_dict()
         if fp16_scaler is not None:
             save_dict['fp16_scaler'] = fp16_scaler.state_dict()
         utils.save_on_master(save_dict, os.path.join(args.output_dir, 'checkpoint.pth'))
-        if epoch and args.saveckp_freq and epoch % args.saveckp_freq == 0:
+        if args.saveckp_freq and epoch and epoch % args.saveckp_freq == 0:
             utils.save_on_master(save_dict, os.path.join(args.output_dir, f'checkpoint{epoch:04}.pth'))
-        log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                     'epoch': epoch}
+        log_stats = {**{f'train_{k}': v for k, v in train_stats.items()}, 'epoch': epoch}
         if utils.is_main_process():
-            with (Path(args.output_dir) / "log.txt").open("a") as f:
+            with (Path(args.output_dir) / "log.train").open("a") as f:
                 f.write(json.dumps(log_stats) + "\n")
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
@@ -484,12 +483,12 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
             dino = dino_loss(student_output, teacher_output, epoch)
             loss = dino + penalty
 
-        if not math.isfinite(penalty.item()):
-            print("Penalty is {}, stopping training".format(loss.item()), force=True)
+        if not penalty.isfinite().all():
+            print("Penalty is {}, stopping training".format(penalty.item()), force=True)
             sys.exit(2)
 
-        if not math.isfinite(dino.item()):
-            print("DINOLoss is {}, stopping training".format(loss.item()), force=True)
+        if not dino.isfinite().all():
+            print("DINOLoss is {}, stopping training".format(dino.item()), force=True)
             sys.exit(2)
 
         # student update
@@ -511,6 +510,7 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
             if args.clip_grad:
                 fp16_scaler.unscale_(optimizer)  # unscale the gradients of optimizer's assigned params in-place
                 torch.nn.utils.clip_grad_norm_(student.parameters(), args.clip_grad)
+                fp16_scaler.unscale_(stn_optimizer) if stn_optimizer else None
                 param_norms = torch.nn.utils.clip_grad_norm_(stn.parameters(), args.clip_grad)
             utils.cancel_gradients_last_layer(epoch, student, args.freeze_last_layer)
             fp16_scaler.step(optimizer)
@@ -527,30 +527,36 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
         # logging
         torch.cuda.synchronize()
         metric_logger.update(loss=loss.item())
+        metric_logger.update(dino=dino.item())
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
         metric_logger.update(wd=optimizer.param_groups[0]["weight_decay"])
+        metric_logger.update(norms=param_norms)
         if stn_penalty:
-            metric_logger.update(dino=dino.item())
             metric_logger.update(penalty=penalty.item())
         if stn_optimizer:
             metric_logger.update(lrstn=stn_optimizer.param_groups[0]["lr"])
-        metric_logger.update(norms=param_norms)
 
         if utils.is_main_process():
             summary_writer.add_scalar(tag="loss", scalar_value=loss.item(), global_step=it)
+            summary_writer.add_scalar(tag="dino", scalar_value=dino.item(), global_step=it)
             summary_writer.add_scalar(tag="lr", scalar_value=optimizer.param_groups[0]["lr"], global_step=it)
             summary_writer.add_scalar(tag="weight decay", scalar_value=optimizer.param_groups[0]["weight_decay"], global_step=it)
             summary_writer.add_scalar(tag="grad norm (stn)", scalar_value=param_norms, global_step=it)
             if stn_penalty:
-                summary_writer.add_scalar(tag="dino", scalar_value=dino.item(), global_step=it)
                 summary_writer.add_scalar(tag="penalty", scalar_value=penalty.item(), global_step=it)
             if stn_optimizer:
                 summary_writer.add_scalar(tag="lr stn", scalar_value=stn_optimizer.param_groups[0]["lr"], global_step=it)
             if it % 10 == 0:
-                scale = torch.stack([torch.det(theta[:, :, :2].float()).abs().mean() for theta in thetas[:2]]).mean()
-                summary_writer.add_scalar(tag="scale global", scalar_value=scale.item(), global_step=it)
-                scale = torch.stack([torch.det(theta[:, :, :2].float()).abs().mean() for theta in thetas[2:]]).mean()
-                summary_writer.add_scalar(tag="scale local", scalar_value=scale.item(), global_step=it)
+                tmp = torch.stack([torch.det(theta[:, :, :2].float()).abs().mean() for theta in thetas[:2]])
+                scale = tmp.mean()
+                std = tmp.std(0)
+                summary_writer.add_scalar(tag="scale global - mean", scalar_value=scale.item(), global_step=it)
+                summary_writer.add_scalar(tag="scale global - std", scalar_value=std.item(), global_step=it)
+                tmp = torch.stack([torch.det(theta[:, :, :2].float()).abs().mean() for theta in thetas[2:]])
+                scale = tmp.mean()
+                std = tmp.std(0)
+                summary_writer.add_scalar(tag="scale local - mean", scalar_value=scale.item(), global_step=it)
+                summary_writer.add_scalar(tag="scale local - std", scalar_value=std.item(), global_step=it)
 
         # Print gradients to STDOUT
         if utils.is_main_process() and args.grad_check_freq and it % args.grad_check_freq == 1:
