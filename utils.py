@@ -943,6 +943,7 @@ class ColorAugmentation(object):
         gaussian_blur = transforms.GaussianBlur(3, (0.1, 2.0))
 
         self.transform_global1 = transforms.Compose([
+            transforms.RandomResizedCrop(32, (0.6, 1), antialias=True),
             transforms.RandomApply([color_jitter], p=0.8),
             transforms.RandomGrayscale(p=0.2),
             transforms.RandomApply([gaussian_blur], p=1.0),
@@ -950,6 +951,7 @@ class ColorAugmentation(object):
         ])
 
         self.transform_global2 = transforms.Compose([
+            transforms.RandomResizedCrop(32, (0.6, 1), antialias=True),
             transforms.RandomApply([color_jitter], p=0.8),
             transforms.RandomGrayscale(p=0.2),
             transforms.RandomApply([gaussian_blur], p=0.1),
@@ -958,6 +960,7 @@ class ColorAugmentation(object):
         ])
 
         self.transform_local = transforms.Compose([
+            transforms.RandomResizedCrop(32, (0.6, 1), antialias=True),
             transforms.RandomApply([color_jitter], p=0.8),
             transforms.RandomGrayscale(p=0.2),
             transforms.RandomApply([gaussian_blur], p=0.5),
