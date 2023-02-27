@@ -919,6 +919,7 @@ def build_transform(args):
     elif args.dataset == "CIFAR10":
         return transforms.Compose([
             transforms.ToTensor(),
+            transforms.RandomResizedCrop(32, (0.6, 1), antialias=True)
             # transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
         ])
     elif args.dataset == "CIFAR100":
