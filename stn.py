@@ -60,18 +60,20 @@ class LocHead(nn.Module):
         self.mode = mode
         self.stn_n_params = N_PARAMS[mode]
         self.feature_dim = feature_dim
-        self.linear0 = nn.Linear(feature_dim, 128)
-        self.linear1 = nn.Linear(128, 64)
-        self.linear2 = nn.Linear(64, self.stn_n_params)
+        self.linear0 = nn.Linear(self.feature_dim, 256)
+        self.linear1 = nn.Linear(256, 64)
+        self.linear2 = nn.Linear(64 * 2, self.stn_n_params)
 
         # Initialize the weights/bias with identity transformation
-        self.linear2.weight.data.zero_()
-        self.linear2.bias.data.copy_(torch.tensor(IDENT_TENSORS[mode], dtype=torch.float))
+        # self.linear2.weight.data.zero_()
+        # self.linear2.bias.data.copy_(torch.tensor(IDENT_TENSORS[mode], dtype=torch.float))
 
     def forward(self, x):
         xs = torch.flatten(x, 1)
         xs = F.leaky_relu(self.linear0(xs))
         xs = F.leaky_relu(self.linear1(xs))
+        noise = torch.normal(mean=0, std=10, size=xs.size(), device=xs.device)
+        xs = torch.cat((xs, noise), dim=1)
         xs = self.linear2(xs)
         return xs
 
@@ -175,11 +177,11 @@ class STN(nn.Module):
             c *= sy
             d *= sy
 
-        out[:, 0, 0] = a
+        out[:, 0, 0] = a  # + (torch.rand_like(a) - 0.5) * 0.6
         out[:, 0, 1] = b
         out[:, 0, 2] = tx
         out[:, 1, 0] = c
-        out[:, 1, 1] = d
+        out[:, 1, 1] = d.abs()  # + (torch.rand_like(a) - 0.5) * 0.6
         out[:, 1, 2] = ty
         return out
 
