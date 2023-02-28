@@ -135,9 +135,11 @@ class VisionTransformer(nn.Module):
     """ Vision Transformer """
     def __init__(self, img_size=224, patch_size=16, in_chans=3, num_classes=0, embed_dim=768, depth=12,
                  num_heads=12, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop_rate=0., attn_drop_rate=0.,
-                 drop_path_rate=0., norm_layer=nn.LayerNorm, **kwargs):
+                 drop_path_rate=0., norm_layer=None, **kwargs):
         super().__init__()
+        self.num_classes = num_classes
         self.num_features = self.embed_dim = embed_dim
+        norm_layer = norm_layer or partial(nn.LayerNorm, eps=1e-6)
 
         self.patch_embed = PatchEmbed(
             img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
@@ -156,7 +158,7 @@ class VisionTransformer(nn.Module):
         self.norm = norm_layer(embed_dim)
 
         # Classifier head
-        self.head = nn.Linear(embed_dim, num_classes) if num_classes > 0 else nn.Identity()
+        self.head = nn.Linear(embed_dim, self.num_classes) if self.num_classes > 0 else None
 
         trunc_normal_(self.pos_embed, std=.02)
         trunc_normal_(self.cls_token, std=.02)
@@ -206,11 +208,14 @@ class VisionTransformer(nn.Module):
 
         return self.pos_drop(x)
 
-    def forward(self, x):
+    def forward(self, x, avg_pool=False):
         x = self.prepare_tokens(x)
         for blk in self.blocks:
             x = blk(x)
         x = self.norm(x)
+        if self.head:
+            x = x[:, 1:].mean(dim=1) if avg_pool else x[:, 0]
+            return self.head(x)
         return x[:, 0]
 
     def get_last_selfattention(self, x):
@@ -233,46 +238,28 @@ class VisionTransformer(nn.Module):
         return output
 
 
-def vit_pico(**kwargs):  # pico
-    model = VisionTransformer(
-        embed_dim=96, depth=6, num_heads=3, mlp_ratio=4,
-        qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
-    return model
+def vit_pico(**kwargs):
+    return VisionTransformer(embed_dim=96, depth=6, num_heads=3, qkv_bias=True, **kwargs)
 
 
 def vit_micro(**kwargs):
-    model = VisionTransformer(
-        embed_dim=96, depth=12, num_heads=3, mlp_ratio=4,
-        qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
-    return model
+    return VisionTransformer(embed_dim=96, num_heads=3, qkv_bias=True, **kwargs)
 
 
 def vit_nano(**kwargs):
-    model = VisionTransformer(
-        embed_dim=192, depth=8, num_heads=3, mlp_ratio=4,
-        qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
-    return model
+    return VisionTransformer(embed_dim=192, depth=8, num_heads=3, qkv_bias=True, **kwargs)
 
 
-def vit_tiny(patch_size=16, **kwargs):
-    model = VisionTransformer(
-        patch_size=patch_size, embed_dim=192, depth=12, num_heads=3, mlp_ratio=4,
-        qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
-    return model
+def vit_tiny(**kwargs):
+    return VisionTransformer(embed_dim=192, num_heads=3, qkv_bias=True, **kwargs)
 
 
-def vit_small(patch_size=16, **kwargs):
-    model = VisionTransformer(
-        patch_size=patch_size, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4,
-        qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
-    return model
+def vit_small(**kwargs):
+    return VisionTransformer(embed_dim=384, num_heads=6, qkv_bias=True, **kwargs)
 
 
-def vit_base(patch_size=16, **kwargs):
-    model = VisionTransformer(
-        patch_size=patch_size, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4,
-        qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
-    return model
+def vit_base(**kwargs):
+    return VisionTransformer(qkv_bias=True, **kwargs)
 
 
 class DINOHead(nn.Module):
