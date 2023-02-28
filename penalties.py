@@ -25,17 +25,24 @@ class ThetaCropsPenalty(nn.Module):
 
     def forward(self, thetas, **args):
         loss = 0
-        for x in thetas[:2]:
-            loss += self._loss(x, self.global_crops_scale)
-        for x in thetas[2:]:
-            loss += self._loss(x, self.local_crops_scale)
+        for n, x in enumerate(thetas[:2]):
+            if n:
+                loss += grad_reverse(self._loss(x, self.global_crops_scale), self.eps)
+            else:
+                loss += grad_rescale(self._loss(x, self.global_crops_scale), self.eps)
+
+        for n, x in enumerate(thetas[2:]):
+            if n % 2:
+                loss += grad_reverse(self._loss(x, self.local_crops_scale), self.eps)
+            else:
+                loss += grad_rescale(self._loss(x, self.local_crops_scale), self.eps)
 
         loss /= len(thetas)
 
-        if self.invert:
-            loss = grad_reverse(loss, self.eps)
-        else:
-            loss = grad_rescale(loss, self.eps)
+        # if self.invert:
+        #     loss = grad_reverse(loss, self.eps)
+        # else:
+        #     loss = grad_rescale(loss, self.eps)
 
         return loss
 
