@@ -2,11 +2,10 @@
 #SBATCH -p mlhiwidlc_gpu-rtx2080-advanced # partition (queue)
 #SBATCH -t 23:59:59 # time (D-HH:MM:SS)
 #SBATCH --gres=gpu:4
-#SBATCH -D /work/dlclarge2/rapanti-metassl-dino-stn/vanilla-dino
-#SBATCH -J baseline-dino # sets the job name. If not specified, the file name will be used as job name
-#SBATCH -o /work/dlclarge2/rapanti-metassl-dino-stn/experiments/baseline-dino/log/%A.%a.%N.out  # STDOUT
-#SBATCH -e /work/dlclarge2/rapanti-metassl-dino-stn/experiments/baseline-dino/log/%A.%a.%N.out  # STDERR
-#SBATCH --array 0-31%1
+#SBATCH -J baseline-dino-tensor # sets the job name. If not specified, the file name will be used as job name
+#SBATCH -o /work/dlclarge2/rapanti-metassl-dino-stn/experiments/baseline-dino-tensor/log/%A.%a.%N.out  # STDOUT
+#SBATCH -e /work/dlclarge2/rapanti-metassl-dino-stn/experiments/baseline-dino-tensor/log/%A.%a.%N.out  # STDERR
+# SBATCH --array 0-31%1
 
 # Print some information about the job to STDOUT
 echo "Workingdir: $PWD"
@@ -16,7 +15,7 @@ echo "Running job $SLURM_JOB_NAME with given JID $SLURM_JOB_ID on queue $SLURM_J
 source /home/rapanti/.profile
 source activate dino
 
-EXP_D=/work/dlclarge2/rapanti-metassl-dino-stn/experiments/baseline-dino
+EXP_D=/work/dlclarge2/rapanti-metassl-dino-stn/experiments/baseline-dino-tensor
 
 # Job to perform
 torchrun \
@@ -35,13 +34,7 @@ torchrun \
       --warmup_epochs 30 \
       --batch_size 256 \
       --use_fp16 true \
-      --saveckp_freq 100
-
-x=$?
-if [ $x == 0 ]
-then
-  scancel "$SLURM_JOB_ID"
-fi
+      --saveckp_freq 0
 
 # Print some Information about the end-time to STDOUT
 echo "DONE";

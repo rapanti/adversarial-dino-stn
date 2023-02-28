@@ -441,38 +441,38 @@ class DataAugmentationDINO(object):
             transforms.RandomGrayscale(p=0.2),
         ])
         normalize = transforms.Compose([
-            transforms.ToTensor(),
             transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
         ])
 
         # first global crop
         self.global_transfo1 = transforms.Compose([
+            transforms.ToTensor(),
             transforms.RandomResizedCrop(
-                args.img_size, scale=global_crops_scale, interpolation=InterpolationMode.BICUBIC),
+                args.img_size, scale=global_crops_scale, interpolation=InterpolationMode.BILINEAR),
             flip_and_color_jitter,
             # utils.GaussianBlur(1.0),
-            transforms.GaussianBlur(1, (0.1, 2.0)),
+            transforms.GaussianBlur(3, (0.1, 2.0)),
             normalize,
         ])
         # second global crop
         self.global_transfo2 = transforms.Compose([
+            transforms.ToTensor(),
             transforms.RandomResizedCrop(
-                args.img_size, scale=global_crops_scale, interpolation=InterpolationMode.BICUBIC),
+                args.img_size, scale=global_crops_scale, interpolation=InterpolationMode.BILINEAR),
             flip_and_color_jitter,
-            # utils.GaussianBlur(p=0.1),
-            transforms.RandomApply([transforms.GaussianBlur(1, (0.1, 2.0))], p=0.1),
-            # utils.Solarization(0.2),
-            transforms.RandomSolarize(1, p=0.2),
+            transforms.RandomApply([transforms.GaussianBlur(3, (0.1, 2.0))], p=0.1),
+            transforms.RandomSolarize(0.5, p=0.2),
             normalize,
         ])
         # transformation for the local small crops
         size = int(((96 / 224) * args.img_size // args.patch_size) * args.patch_size)
         self.local_crops_number = local_crops_number
         self.local_transfo = transforms.Compose([
-            transforms.RandomResizedCrop(size, scale=local_crops_scale, interpolation=InterpolationMode.BICUBIC),
+            transforms.ToTensor(),
+            transforms.RandomResizedCrop(size, scale=local_crops_scale, interpolation=InterpolationMode.BILINEAR),
             flip_and_color_jitter,
             # utils.GaussianBlur(p=0.5),
-            transforms.RandomApply([transforms.GaussianBlur(1, (0.1, 2.0))], p=0.5),
+            transforms.RandomApply([transforms.GaussianBlur(3, (0.1, 2.0))], p=0.5),
             normalize,
         ])
 
