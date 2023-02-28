@@ -41,41 +41,6 @@ import matplotlib
 import matplotlib.pyplot as plt
 
 
-class GaussianBlur(object):
-    """
-    Apply Gaussian Blur to the PIL image.
-    """
-    def __init__(self, p=0.5, radius_min=0.1, radius_max=2.):
-        self.prob = p
-        self.radius_min = radius_min
-        self.radius_max = radius_max
-
-    def __call__(self, img):
-        do_it = random.random() <= self.prob
-        if not do_it:
-            return img
-
-        return img.filter(
-            ImageFilter.GaussianBlur(
-                radius=random.uniform(self.radius_min, self.radius_max)
-            )
-        )
-
-
-class Solarization(object):
-    """
-    Apply Solarization to the PIL image.
-    """
-    def __init__(self, p):
-        self.p = p
-
-    def __call__(self, img):
-        if random.random() < self.p:
-            return ImageOps.solarize(img)
-        else:
-            return img
-
-
 def load_stn_pretrained_weights(model, pretrained_weights):
     if os.path.isfile(pretrained_weights):
         state_dict = torch.load(pretrained_weights, map_location="cpu")
@@ -126,14 +91,7 @@ def load_pretrained_weights(model, pretrained_weights, checkpoint_key, model_nam
             print("There is no reference weights available for this model => We use random weights.")
 
 
-def load_pretrained_linear_weights(linear_classifier, pretrained_weights, model_name, patch_size):
-    if pretrained_weights:
-        if not os.path.isfile(pretrained_weights):
-            print('Given path of pretrained weights is not valid.')
-            sys.exit(1)
-        state_dict = torch.load(pretrained_weights, map_location="cpu")
-        linear_classifier.load_state_dict(state_dict, strict=True)
-        return
+def load_pretrained_linear_weights(linear_classifier, model_name, patch_size):
     url = None
     if model_name == "vit_small" and patch_size == 16:
         url = "dino_deitsmall16_pretrain/dino_deitsmall16_linearweights.pth"
@@ -151,18 +109,6 @@ def load_pretrained_linear_weights(linear_classifier, pretrained_weights, model_
         linear_classifier.load_state_dict(state_dict, strict=True)
     else:
         print("We use random linear weights.")
-
-
-def clip_gradients(model, clip):
-    norms = []
-    for name, p in model.named_parameters():
-        if p.grad is not None:
-            param_norm = p.grad.data.norm(2)
-            norms.append(param_norm.item())
-            clip_coef = clip / (param_norm + 1e-6)
-            if clip_coef < 1:
-                p.grad.data.mul_(clip_coef)
-    return norms
 
 
 def cancel_gradients_last_layer(epoch, model, freeze_last_layer):
@@ -510,7 +456,7 @@ def init_distributed_mode(args):
         sys.exit(1)
 
     dist.init_process_group(
-        backend="gloo" if 'win' in sys.platform else "nccl",
+        backend=args.dist_backend,
         init_method=args.dist_url,
         world_size=args.world_size,
         rank=args.rank,
@@ -1077,6 +1023,41 @@ LEGACY CODE ||| SAVED FOR LATER USE
 """
 
 
+class GaussianBlur(object):
+    """
+    Apply Gaussian Blur to the PIL image.
+    """
+    def __init__(self, p=0.5, radius_min=0.1, radius_max=2.):
+        self.prob = p
+        self.radius_min = radius_min
+        self.radius_max = radius_max
+
+    def __call__(self, img):
+        do_it = random.random() <= self.prob
+        if not do_it:
+            return img
+
+        return img.filter(
+            ImageFilter.GaussianBlur(
+                radius=random.uniform(self.radius_min, self.radius_max)
+            )
+        )
+
+
+class Solarization(object):
+    """
+    Apply Solarization to the PIL image.
+    """
+    def __init__(self, p):
+        self.p = p
+
+    def __call__(self, img):
+        if random.random() < self.p:
+            return ImageOps.solarize(img)
+        else:
+            return img
+
+
 class DataAugmentationDINO(object):
     def __init__(self, global_crops_scale, local_crops_scale, local_crops_number):
         flip_and_color_jitter = transforms.Compose([
@@ -1121,3 +1102,15 @@ class DataAugmentationDINO(object):
         for _ in range(self.local_crops_number):
             crops.append(self.local_transfo(image))
         return crops
+
+
+def clip_gradients(model, clip):
+    norms = []
+    for name, p in model.named_parameters():
+        if p.grad is not None:
+            param_norm = p.grad.data.norm(2)
+            norms.append(param_norm.item())
+            clip_coef = clip / (param_norm + 1e-6)
+            if clip_coef < 1:
+                p.grad.data.mul_(clip_coef)
+    return norms

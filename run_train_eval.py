@@ -97,6 +97,7 @@ parser.add_argument('--output_dir', default=".", type=str, help='Path to save lo
 parser.add_argument('--saveckp_freq', default=20, type=int, help='Save checkpoint every x epochs.')
 parser.add_argument('--seed', default=0, type=int, help='Random seed.')
 parser.add_argument('--num_workers', default=8, type=int, help='Number of data loading workers per GPU.')
+parser.add_argument('--dist_backend', default='nccl', type=str, help='Type of Distributed backend. (default: "nccl"')
 parser.add_argument("--dist_url", default="env://", type=str, help="""url used to set up
     distributed training; see https://pytorch.org/docs/stable/distributed.html""")
 parser.add_argument("--local_rank", default=0, type=int, help="Please ignore and do not set this argument.")
@@ -170,7 +171,6 @@ parser.add_argument('--avgpool_patchtokens', default=False, type=utils.bool_flag
                          'We typically set this to False for ViT-Small and to True with ViT-Base.')
 # Misc
 parser.add_argument('--val_freq', default=1, type=int, help="Epoch frequency for validation.")
-parser.add_argument('--evaluate', dest='evaluate', action='store_true', help='evaluate model on validation set')
 # ======================================================================================================================
 # ===============================================   PIPELINE PARAMETER   ===============================================
 # ======================================================================================================================
