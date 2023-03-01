@@ -34,6 +34,7 @@ from vision_transformer import DINOHead
 
 import penalties
 from stn import AugmentationNetwork, STN
+from multi_loss_backward import MultiLossBack
 
 torchvision_archs = sorted(name for name in torchvision_models.__dict__
                            if name.islower() and not name.startswith("__")
@@ -298,6 +299,7 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
                     stn, stn_optimizer, stn_lr_schedule, stn_penalty, color_augment):
     metric_logger = utils.MetricLogger(delimiter=" ")
     header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
+    mlb = MultiLossBack(stn.parameters())
     for it, (images, _) in enumerate(metric_logger.log_every(data_loader, 10, header)):
         # update weight decay and learning rate according to their schedule
         it = len(data_loader) * epoch + it  # global training iteration
@@ -349,10 +351,11 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
             stn_optimizer.zero_grad()
         param_norms = None
         if fp16_scaler is None:
-            loss.backward()
+            # loss.backward()
+            mlb.back([penalty, dino], [1, 1])
             if args.clip_grad:
-                torch.nn.utils.clip_grad_norm_(student.parameters(), args.clip_grad)
-                param_norms = torch.nn.utils.clip_grad_norm_(stn.parameters(), args.clip_grad)
+                param_norms = torch.nn.utils.clip_grad_norm_(student.parameters(), args.clip_grad)
+                # param_norms = torch.nn.utils.clip_grad_norm_(stn.parameters(), args.clip_grad)
             utils.cancel_gradients_last_layer(epoch, student, args.freeze_last_layer)
             optimizer.step()
             if stn_optimizer:
@@ -361,9 +364,9 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
             fp16_scaler.scale(loss).backward()
             if args.clip_grad:
                 fp16_scaler.unscale_(optimizer)  # unscale the gradients of optimizer's assigned params in-place
-                torch.nn.utils.clip_grad_norm_(student.parameters(), args.clip_grad)
-                fp16_scaler.unscale_(stn_optimizer) if stn_optimizer else None
-                param_norms = torch.nn.utils.clip_grad_norm_(stn.parameters(), args.clip_grad)
+                param_norms = torch.nn.utils.clip_grad_norm_(student.parameters(), args.clip_grad)
+                # fp16_scaler.unscale_(stn_optimizer) if stn_optimizer else None
+                # param_norms = torch.nn.utils.clip_grad_norm_(stn.parameters(), args.clip_grad)
             utils.cancel_gradients_last_layer(epoch, student, args.freeze_last_layer)
             fp16_scaler.step(optimizer)
             if stn_optimizer:
@@ -394,21 +397,21 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
             summary_writer.add_scalar(tag="lr", scalar_value=optimizer.param_groups[0]["lr"], global_step=it)
             summary_writer.add_scalar(tag="weight decay", scalar_value=optimizer.param_groups[0]["weight_decay"],
                                       global_step=it)
-            summary_writer.add_scalar(tag="grad norm (stn)", scalar_value=param_norms, global_step=it)
+            summary_writer.add_scalar(tag="grad norm (dino)", scalar_value=param_norms, global_step=it)
             if stn_penalty:
                 summary_writer.add_scalar(tag="penalty", scalar_value=penalty.item(), global_step=it)
             if stn_optimizer:
                 summary_writer.add_scalar(tag="lr stn", scalar_value=stn_optimizer.param_groups[0]["lr"],
                                           global_step=it)
             if it % 10 == 0:
-                tmp = torch.stack([torch.det(theta[:, :, :2].float()).abs().mean() for theta in thetas[:2]])
+                tmp = torch.stack([torch.det(theta[:, :, :2].float()).abs() for theta in thetas[:2]])
                 scale = tmp.mean()
-                std = tmp.std(0)
+                std = tmp.std(0).mean()
                 summary_writer.add_scalar(tag="scale global - mean", scalar_value=scale.item(), global_step=it)
                 summary_writer.add_scalar(tag="scale global - std", scalar_value=std.item(), global_step=it)
-                tmp = torch.stack([torch.det(theta[:, :, :2].float()).abs().mean() for theta in thetas[2:]])
+                tmp = torch.stack([torch.det(theta[:, :, :2].float()).abs() for theta in thetas[2:]])
                 scale = tmp.mean()
-                std = tmp.std(0)
+                std = tmp.std(0).mean()
                 summary_writer.add_scalar(tag="scale local - mean", scalar_value=scale.item(), global_step=it)
                 summary_writer.add_scalar(tag="scale local - std", scalar_value=std.item(), global_step=it)
 
