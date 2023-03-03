@@ -189,18 +189,28 @@ class STN(nn.Module):
         thetas = [self._get_stn_mode_theta(params, x) for params in theta_params]
 
         if self.theta_norm:
-            thetas = [theta / torch.linalg.norm(theta, ord=1, dim=2, keepdim=True).clamp(min=1) for theta in thetas]
+            thetas = [theta / theta.norm(1, dim=2, keepdim=True).clamp(min=1).max(dim=1, keepdim=True).values
+                      for theta in thetas]
+            # normed = []
+            # for theta in thetas:
+            #     norm = theta.norm(1, dim=2, keepdim=True).norm(2, dim=1, keepdim=True).clamp(min=1).repeat(1, 1, 3)
+            #     norm[:, :, -1] = 1.
+            #     theta = theta / norm
+            #     normed.append(theta)
+            # thetas = normed
 
         align_corners = True
         crops = []
+        grids = []
         resolutions = [[self.global_res, self.global_res]] * 2 + \
                       [[self.local_res, self.local_res]] * self.local_crops_number
         for theta, res in zip(thetas, resolutions):
             grid = F.affine_grid(theta, size=list(x.size()[:2]) + res, align_corners=align_corners)
+            grids.append(grid)
             crop = F.grid_sample(x, grid, align_corners=align_corners)
             crops.append(crop)
 
-        return crops, thetas
+        return crops, thetas, grids
 
 
 class AugmentationNetwork(nn.Module):

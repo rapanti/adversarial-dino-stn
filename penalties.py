@@ -8,6 +8,152 @@ from torchvision import transforms
 from utils import grad_reverse, grad_rescale
 
 
+class Centroid(nn.Module):
+    def __init__(self,
+                 eps: float = 1.,
+                 invert: bool = False,
+                 local_crops_scale=(0.05, 0.4),
+                 global_crops_scale=(0.4, 1.),
+                 loss_fn=nn.HuberLoss,
+                 **args):
+        super(Centroid, self).__init__()
+        self.eps = eps
+        self.invert = invert
+        self.local_crops_scale = local_crops_scale
+        self.global_crops_scale = global_crops_scale
+        self.loss_fn = loss_fn()
+
+    def forward(self, thetas, **args):
+        loss = 0
+        for x in thetas[:2]:
+            loss += self._loss(x, .9)
+        for x in thetas[2:]:
+            loss += self._loss(x, .8)
+
+        loss /= len(thetas)
+
+        if self.invert:
+            loss = grad_reverse(loss, self.eps)
+        else:
+            loss = grad_rescale(loss, self.eps)
+
+        return loss
+
+    def _loss(self, theta, center):
+        txy = (1 - (theta[:, :, 2].abs() / 2)).prod(dim=1)
+        if txy.mean() < center:
+            target = torch.ones_like(txy)
+        else:
+            target = torch.rand_like(txy)
+        return self.loss_fn(txy, target)
+
+
+class CropsScale(nn.Module):
+    def __init__(self,
+                 eps: float = 1.,
+                 invert: bool = False,
+                 local_crops_scale=(0.05, 0.4),
+                 global_crops_scale=(0.4, 1.),
+                 loss_fn=nn.HuberLoss,
+                 **args):
+        super(CropsScale, self).__init__()
+        self.eps = eps
+        self.invert = invert
+        self.local_crops_scale = local_crops_scale
+        self.global_crops_scale = global_crops_scale
+        self.loss_fn = loss_fn()
+
+    def forward(self, grids, **args):
+        loss = 0
+        for x in grids[:2]:
+            loss += self._loss(x, self.global_crops_scale)
+        for x in grids[2:]:
+            loss += self._loss(x, self.local_crops_scale)
+
+        loss /= len(grids)
+
+        if self.invert:
+            loss = grad_reverse(loss, self.eps)
+        else:
+            loss = grad_rescale(loss, self.eps)
+
+        return loss
+
+    def _loss(self, grid, scale):
+        a, b = scale
+        left, right = grid[:, 0, :].min(dim=1).values, grid[:, 0, :].max(dim=1).values  # min/max of x-coord/axis
+        top, bottom = grid[:, 1, :].min(dim=1).values, grid[:, 1, :].max(dim=1).values  # min/max of y-coord/axis
+        area = (right - left) * (bottom - top) / 4
+        # det = torch.det(theta[:, :, :2].float()).abs()
+        target = (b - a) * torch.rand_like(area) + a
+        target[area < a] = 1.
+        return self.loss_fn(area, target)
+
+
+class Overlap(nn.Module):
+    """
+    Like OverlapPenalty, reduce the overlapping area between crops.
+    """
+    def __init__(self, eps: float = 1., invert: bool = False, local_crops_number=8, global_crops_number=2,
+                 local_overlap=1/3, global_overlap=2/3, loss_fn=nn.HuberLoss, **args):
+        super(Overlap, self).__init__()
+        self.eps = eps
+        self.invert = invert
+        self.n_local = local_crops_number
+        self.n_global = global_crops_number
+        self.local_overlap = local_overlap
+        self.global_overlap = global_overlap
+        self.mu = 0.1
+        self.loss_fn = loss_fn()
+
+    def forward(self, grids, **args):
+        grids = [grid.reshape(grid.size(0), 2, -1) for grid in grids]  # flatten grids
+
+        # global views
+        global1, global2 = grids[:2]
+        overlap = self._overlap(global1, global2)
+        if self.global_overlap + self.mu < overlap.mean():
+            target = torch.full_like(overlap, self.global_overlap)
+        else:
+            target = (2 * self.mu) * torch.rand_like(overlap) + (self.global_overlap - self.mu)
+        loss = self.loss_fn(overlap, target)
+        n_loss_terms = 1
+
+        # local views
+        for ida, a in enumerate(grids[2:]):
+            for idb in range(ida + 3, len(grids)):
+                b = grids[idb]
+                overlap = self._overlap(a, b)
+                if self.local_overlap + self.mu < overlap.mean():
+                    target = torch.full_like(overlap, self.local_overlap)
+                else:
+                    target = (2 * self.mu) * torch.rand_like(overlap) + (self.local_overlap - self.mu)
+                loss += self.loss_fn(overlap, target)
+                n_loss_terms += 1
+
+        loss /= n_loss_terms
+
+        if self.invert:
+            total_loss = grad_reverse(loss, self.eps)
+        else:
+            total_loss = grad_rescale(loss, self.eps)
+
+        return total_loss
+
+    @staticmethod
+    def _overlap(grid1, grid2):
+        left1, right1 = grid1[:, 0, :].min(dim=1).values, grid1[:, 0, :].max(dim=1).values  # min/max of x-coord/axis
+        top1, bottom1 = grid1[:, 1, :].min(dim=1).values, grid1[:, 1, :].max(dim=1).values  # min/max of y-coord/axis
+        left2, right2 = grid2[:, 0, :].min(dim=1).values, grid2[:, 0, :].max(dim=1).values  # min/max of x-coord/axis
+        top2, bottom2 = grid2[:, 1, :].min(dim=1).values, grid2[:, 1, :].max(dim=1).values  # min/max of y-coord/axis
+
+        x = torch.clamp(torch.min(right1, right2) - torch.max(left1, left2), 0)  # length of x-overlap
+        y = torch.clamp(torch.min(bottom1, bottom2) - torch.max(top1, top2), 0)  # length of y-overlap
+        area = x * y / 4.
+
+        return area
+
+
 class ThetaCropsPenalty(nn.Module):
     def __init__(self,
                  invert: bool = False,
@@ -58,7 +204,7 @@ class ThetaCropsPenalty(nn.Module):
         return self.loss_fn(det, targed) + self.loss_fn(txy, target)
 
 
-class OverlapPenalty(nn.Module):
+class _OverlapPenalty(nn.Module):
     """
     Another penalty that uses theta. Generates the sampling/affine grid from theta. The grid is then used to calculate
     the overlap between the different views. Global to global and local to local cross-similarity.

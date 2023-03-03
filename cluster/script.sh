@@ -2,9 +2,9 @@
 #SBATCH -p mlhiwidlc_gpu-rtx2080-advanced # partition (queue)
 #SBATCH -t 23:59:59 # time (D-HH:MM:SS)
 #SBATCH --gres=gpu:4
-#SBATCH -J test-multilossback # sets the job name. If not specified, the file name will be used as job name
-#SBATCH -o /work/dlclarge2/rapanti-metassl-dino-stn/experiments/test-multilossback/log/%A.%a.%N.out  # STDOUT
-#SBATCH -e /work/dlclarge2/rapanti-metassl-dino-stn/experiments/test-multilossback/log/%A.%a.%N.out  # STDERR
+#SBATCH -J test-multilossback-all-penalties # sets the job name. If not specified, the file name will be used as job name
+#SBATCH -o /work/dlclarge2/rapanti-metassl-dino-stn/experiments/test-multilossback-all-penalties/log/%A.%a.%N.out  # STDOUT
+#SBATCH -e /work/dlclarge2/rapanti-metassl-dino-stn/experiments/test-multilossback-all-penalties/log/%A.%a.%N.out  # STDERR
 #SBATCH --array 0-3%1
 
 # Print some information about the job to STDOUT
@@ -15,7 +15,7 @@ echo "Running job $SLURM_JOB_NAME with given JID $SLURM_JOB_ID on queue $SLURM_J
 source /home/rapanti/.profile
 source activate dino
 
-EXP_D=/work/dlclarge2/rapanti-metassl-dino-stn/experiments/test-multilossback
+EXP_D=/work/dlclarge2/rapanti-metassl-dino-stn/experiments/test-multilossback-all-penalties
 
 # Job to perform
 torchrun \
@@ -38,11 +38,14 @@ torchrun \
       --saveckp_freq 100 \
       --stn_res 32 16 \
       --invert_stn_gradients true \
-      --use_stn_optimizer false \
+      --use_stn_optimizer true \
+      --stn_lr 0.0001 \
+      --stn_warmup_epochs 30 \
       --stn_theta_norm true \
       --use_unbounded_stn true \
       --stn_mode translation_scale_symmetric \
-      --stn_penalty ThetaCropsPenalty \
+      --stn_penalty CropsScale Centroid Overlap \
+      --mlb_weights 1 1 1 1 \
       --invert_penalty true \
       --stn_color_augment true \
       --summary_writer_freq 100

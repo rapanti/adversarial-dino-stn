@@ -46,6 +46,7 @@ penalty_dict = {
     penalty: penalties.__dict__[penalty] for penalty in penalty_list
 }
 
+
 def train_dino(args):
     utils.init_distributed_mode(args)
     utils.fix_random_seeds(args.seed)
@@ -162,7 +163,7 @@ def train_dino(args):
         args.epochs,
     ).cuda()
 
-    stn_penalty = penalty_dict[args.stn_penalty](
+    stn_penalty = [penalty_dict[pen](
         invert=args.invert_penalty,
         eps=args.epsilon,
         target=args.penalty_target,
@@ -171,9 +172,10 @@ def train_dino(args):
         min_glb_overlap=args.min_glb_overlap,
         min_lcl_overlap=args.min_lcl_overlap,
         resolution=32,
-        exponent=2,
         bins=100,
-    ).cuda() if args.stn_penalty else None
+    ).cuda() for pen in args.stn_penalty] if args.stn_penalty else None
+
+    assert len(args.mlb_weights) == len(args.stn_penalty) + 1
 
     # ============ preparing optimizer ... ============
     params_groups = utils.get_params_groups(student)
@@ -320,11 +322,12 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
 
         # teacher and student forward passes + compute dino loss
         with torch.cuda.amp.autocast(fp16_scaler is not None):
-            stn_images, thetas = stn(images)
+            stn_images, thetas, grids = stn(images)
 
-            penalty = torch.tensor(0.).cuda()
+            penalty = []
             if stn_penalty:
-                penalty = stn_penalty(images=stn_images, target=images, thetas=thetas)
+                for pen in stn_penalty:
+                    penalty.append(pen(images=stn_images, target=images, thetas=thetas, grids=grids))
 
             if utils.is_main_process() and args.summary_writer_freq and it % args.summary_writer_freq == 0:
                 utils.summary_writer_write_images_thetas(summary_writer, stn_images, images, thetas, epoch, it)
@@ -335,13 +338,16 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
             teacher_output = teacher(stn_images[:2])  # only the 2 global views pass through the teacher
             student_output = student(stn_images)
             dino = dino_loss(student_output, teacher_output, epoch)
-            loss = dino + penalty
+            loss = dino + 0
+            for pen in penalty:
+                loss += pen
 
-        if not penalty.isfinite().all():
-            print("Penalty is {}, stopping training".format(penalty.item()), force=True)
-            sys.exit(2)
+        for n, pen in enumerate(penalty):
+            if not pen.isfinite():
+                print("Penalty({}) is {}, stopping training".format(n, pen.item()), force=True)
+                sys.exit(2)
 
-        if not dino.isfinite().all():
+        if not dino.isfinite():
             print("DINOLoss is {}, stopping training".format(dino.item()), force=True)
             sys.exit(2)
 
@@ -352,7 +358,7 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
         param_norms = None
         if fp16_scaler is None:
             # loss.backward()
-            mlb.back([penalty, dino], [1, 1])
+            mlb.backward([dino, *penalty], args.mlb_weights)
             if args.clip_grad:
                 param_norms = torch.nn.utils.clip_grad_norm_(student.parameters(), args.clip_grad)
                 # param_norms = torch.nn.utils.clip_grad_norm_(stn.parameters(), args.clip_grad)
@@ -386,8 +392,8 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
         metric_logger.update(wd=optimizer.param_groups[0]["weight_decay"])
         metric_logger.update(norms=param_norms)
-        if stn_penalty:
-            metric_logger.update(penalty=penalty.item())
+        # if stn_penalty:
+        #     metric_logger.update(penalty=penalty.item())
         if stn_optimizer:
             metric_logger.update(lrstn=stn_optimizer.param_groups[0]["lr"])
 
@@ -399,7 +405,8 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
                                       global_step=it)
             summary_writer.add_scalar(tag="grad norm (dino)", scalar_value=param_norms, global_step=it)
             if stn_penalty:
-                summary_writer.add_scalar(tag="penalty", scalar_value=penalty.item(), global_step=it)
+                for val, pen in zip(penalty, stn_penalty):
+                    summary_writer.add_scalar(tag=pen.__class__.__name__, scalar_value=val.item(), global_step=it)
             if stn_optimizer:
                 summary_writer.add_scalar(tag="lr stn", scalar_value=stn_optimizer.param_groups[0]["lr"],
                                           global_step=it)
@@ -481,9 +488,8 @@ class DINOLoss(nn.Module):
         self.center = self.center * self.center_momentum + batch_center * (1 - self.center_momentum)
 
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser('DINO')
-
+def get_args_parser():
+    parser = argparse.ArgumentParser('DINO', add_help=False)
     # Model parameters
     parser.add_argument('--arch', default='vit_small', type=str,
                         choices=['vit_pico', 'vit_micro', 'vit_nano', 'vit_tiny', 'vit_small', 'vit_base', 'xcit',
@@ -563,7 +569,7 @@ if __name__ == '__main__':
     parser.add_argument('--data_path', default='/path/to/imagenet/train/', type=str,
                         help='Specify path to the training data.')
     parser.add_argument('--output_dir', default=".", type=str, help='Path to save logs and checkpoints.')
-    parser.add_argument('--saveckp_freq', default=20, type=int, help='Save checkpoint every x epochs.')
+    parser.add_argument('--saveckp_freq', default=0, type=int, help='Save checkpoint every x epochs.')
     parser.add_argument('--seed', default=0, type=int, help='Random seed.')
     parser.add_argument('--num_workers', default=8, type=int, help='Number of data loading workers per GPU.')
     parser.add_argument('--dist_backend', default='nccl', type=str,
@@ -611,7 +617,7 @@ if __name__ == '__main__':
                         help="Specifies the number of feature maps of conv2 for the STN localization network (default: 32).")
     parser.add_argument("--stn_theta_norm", default=False, type=utils.bool_flag,
                         help="Set this flag to normalize 'theta' in the STN before passing to affine_grid(theta, ...). Fixes the problem with cropping of the images (black regions)")
-    parser.add_argument("--stn_penalty", default=None, type=str, choices=penalty_list,
+    parser.add_argument("--stn_penalty", default=None, type=str, nargs='+', choices=penalty_list,
                         help="Specify the name of the similarity to use.")
     parser.add_argument("--epsilon", default=1., type=float,
                         help="Scalar for the penalty loss. Rescales the gradient by multiplication.")
@@ -622,15 +628,24 @@ if __name__ == '__main__':
     parser.add_argument("--summary_plot_size", default=16, type=int,
                         help="Defines the number of samples to show in the summary writer.")
     parser.add_argument("--penalty_target", default='mean', type=str, choices=['zero', 'one', 'mean', 'rand'],
-                        help="Specify the type of target of the penalty. Here, the target is the area with respect to"
-                             "the original image. `zero` and `one` are the values itself. `mean` and `rand` are"
-                             "inferred with respect to given crop-scales.")
+                        help="""Specify the type of target of the penalty. Here, the target is the area with respect
+                        to the original image. `zero` and `one` are the values itself. `mean` and `rand` are inferred
+                        with respect to given crop-scales.""")
     parser.add_argument("--min_glb_overlap", default=0.5, type=float,
                         help="The minimal overlap between the two global crops.")
     parser.add_argument("--min_lcl_overlap", default=0.1, type=float,
                         help="The minimal overlap between two local crops.")
+    parser.add_argument("--mlb_weights", default=1, type=float, nargs='+', help="""The weights of DINOLoss and the 
+        individual penalties. DINOLoss is the first value, add the weights fot the other penalties in order of the 
+        other argument --stn_penalty. atm do NOT use fp16.
+        Example --stn_penalty CropScale Centroid --mlb_weights 1 1 1""")
 
-    parser_args = parser.parse_args()
+    return parser
 
-    Path(parser_args.output_dir).mkdir(parents=True, exist_ok=True)
-    train_dino(parser_args)
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser('DINO', parents=[get_args_parser()])
+    argz = parser.parse_args()
+
+    Path(argz.output_dir).mkdir(parents=True, exist_ok=True)
+    train_dino(argz)

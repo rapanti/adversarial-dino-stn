@@ -8,7 +8,7 @@ class MultiLossBack(object):
         self.max_norm = max_norm
         self.params = list(params)
 
-    def back(self, loss_array, weights):
+    def backward(self, loss_array, weights):
         for loss_index, loss in enumerate(loss_array):
             loss.backward(retain_graph=True)
             self._clip_gradients()

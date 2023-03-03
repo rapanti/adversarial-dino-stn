@@ -328,8 +328,9 @@ def build_transform(is_train, args):
     ])
 
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser('Evaluation with linear classification on ImageNet')
+def get_args_parser():
+    parser = argparse.ArgumentParser('Eval Linear', add_help=False)
+
     parser.add_argument('--batch_size', default=768, type=int, help='mini-batch size (default: 768)')
     parser.add_argument('--epochs', default=100, type=int, help='Number of epochs of training. (default: 100)')
     # Model parameters
@@ -363,6 +364,12 @@ if __name__ == '__main__':
     parser.add_argument('--val_freq', default=1, type=int, help="Epoch frequency for validation.")
     parser.add_argument('--output_dir', default=".", help='Path to save logs and checkpoints')
 
+    return parser
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser('Evaluation with linear classification', parents=[get_args_parser()])
     args = parser.parse_args()
+
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     eval_linear(args)
