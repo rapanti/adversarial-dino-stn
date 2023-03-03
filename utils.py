@@ -963,15 +963,16 @@ class SummaryWriterCustom(SummaryWriter):
 
 
 def summary_writer_write_images_thetas(summary_writer, stn_images, images, thetas, epoch, it):
-    theta_g1 = thetas[0][0].cpu().detach().numpy()
-    theta_g2 = thetas[1][0].cpu().detach().numpy()
-    theta_l1 = thetas[2][0].cpu().detach().numpy()
-    theta_l2 = thetas[3][0].cpu().detach().numpy()
     summary_writer.write_image_grid(tag="images", images=stn_images, original_images=images, epoch=epoch, global_step=it)
-    summary_writer.write_theta_heatmap(tag="theta_g1", theta=theta_g1, epoch=epoch, global_step=it)
-    summary_writer.write_theta_heatmap(tag="theta_g2", theta=theta_g2, epoch=epoch, global_step=it)
-    summary_writer.write_theta_heatmap(tag="theta_l1", theta=theta_l1, epoch=epoch, global_step=it)
-    summary_writer.write_theta_heatmap(tag="theta_l2", theta=theta_l2, epoch=epoch, global_step=it)
+    if thetas:
+        theta_g1 = thetas[0][0].cpu().detach().numpy()
+        theta_g2 = thetas[1][0].cpu().detach().numpy()
+        theta_l1 = thetas[2][0].cpu().detach().numpy()
+        theta_l2 = thetas[3][0].cpu().detach().numpy()
+        summary_writer.write_theta_heatmap(tag="theta_g1", theta=theta_g1, epoch=epoch, global_step=it)
+        summary_writer.write_theta_heatmap(tag="theta_g2", theta=theta_g2, epoch=epoch, global_step=it)
+        summary_writer.write_theta_heatmap(tag="theta_l1", theta=theta_l1, epoch=epoch, global_step=it)
+        summary_writer.write_theta_heatmap(tag="theta_l2", theta=theta_l2, epoch=epoch, global_step=it)
 
 
 def image_grid(images, original_images, epoch, plot_size=16):
