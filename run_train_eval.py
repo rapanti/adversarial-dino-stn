@@ -29,6 +29,7 @@ if __name__ == "__main__":
         args.checkpoint_key = "teacher"
         args.n_last_blocks = 4
         args.avgpool_patchtokens = False
+        args.val_freq = 1
         print('STARTING EVALUATION')
         eval_linear.eval_linear(args, True)
         print('FINISHED EVALUATION')

@@ -225,7 +225,10 @@ def train_dino(args):
     # momentum parameter is increased to 1. during training with a cosine schedule
     momentum_schedule = utils.cosine_scheduler(args.momentum_teacher, 1, args.epochs, len(data_loader))
 
-    rrc_or_stn = [[False] * args.alternate + [True] * args.alternate for _ in range(args.epochs // args.alternate + 1)]
+    rrc_or_stn = [[False] * args.rrc_epochs + [True] * args.stn_epochs
+                  for _ in range(args.epochs // (args.rrc_epochs + args.stn_epochs) + 1)]
+
+    rrc_or_stn = [item for items in rrc_or_stn for item in items]
 
     print(f"Loss, optimizer and schedulers ready.")
 
@@ -252,17 +255,15 @@ def train_dino(args):
         summary_writer = utils.SummaryWriterCustom(log_dir=Path(args.output_dir) / "summary",
                                                    plot_size=args.summary_plot_size)
 
-    stn_epoch = 0
+    stn_iteration = 0
     start_time = time.time()
     print("Starting DINO training !")
     for epoch in range(start_epoch, args.epochs):
-        if epoch and epoch % args.train_stn_freq == 0:
-            for _ in range(args.stn_epochs):
-                train_stn(student, teacher, dino_loss, data_loader, stn, stn_optimizer, stn_penalty, color_augment,
-                          stn_epoch, args, summary_writer)
-                stn_epoch += 1
-
         data_loader.sampler.set_epoch(epoch)
+
+        if epoch and epoch % args.train_stn_freq == 0:
+            train_stn(student, teacher, data_loader, stn, stn_optimizer, stn_penalty, stn_iteration, args, summary_writer)
+            stn_iteration += 1
 
         use_stn = rrc_or_stn[epoch]
         # ============ training one epoch of DINO ... ============
@@ -297,79 +298,87 @@ def train_dino(args):
     print('Training time {}'.format(total_time_str))
 
 
-def train_stn(student, teacher, dino_loss, data_loader, stn, stn_optimizer, stn_penalty, color_augment, epoch, args,
+def train_stn(student, teacher, data_loader, stn, stn_optimizer, stn_penalty, iterations, args,
               summary_writer):
+    print("STN TRAINING")
     metric_logger = utils.MetricLogger(delimiter=" ")
-    header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
-    for it, (images, _) in enumerate(metric_logger.log_every(data_loader, 10, header)):
-        # update weight decay and learning rate according to their schedule
-        it = len(data_loader) * epoch + it  # global training iteration
+    loss_fn = DINOLossSTN(
+        args.out_dim,
+        args.local_crops_number + 2,
+        args.warmup_teacher_temp,
+        args.teacher_temp,
+        args.warmup_teacher_temp_epochs,
+        args.stn_train_epochs,
+    ).cuda()
+    for epoch in range(args.stn_train_epochs):
+        header = 'Epoch: [{}/{}]'.format(epoch, args.stn_train_epochs)
+        for it, (images, _) in enumerate(metric_logger.log_every(data_loader, 10, header)):
+            it = len(data_loader) * epoch + it + iterations * len(data_loader) * args.stn_train_epochs
 
-        # move images to gpu
-        if isinstance(images, list):
-            images = [im.cuda(non_blocking=True) for im in images]
-        else:
-            images = images.cuda(non_blocking=True)
+            if isinstance(images, list):
+                images = [im.cuda(non_blocking=True) for im in images]
+            else:
+                images = images.cuda(non_blocking=True)
 
-        stn_images, thetas = stn(images)
+            stn_images, thetas = stn(images)
 
-        penalty = stn_penalty(images=stn_images, target=images, thetas=thetas)
+            penalty = stn_penalty(images=stn_images, target=images, thetas=thetas)
 
-        if utils.is_main_process() and args.summary_writer_freq and it % args.summary_writer_freq == 0:
-            utils.summary_writer_write_images_thetas(summary_writer, stn_images, images, thetas, epoch, it)
+            if utils.is_main_process() and args.summary_writer_freq and it % args.summary_writer_freq == 0:
+                utils.summary_writer_write_images_thetas(summary_writer, stn_images, images, thetas, epoch, it)
 
-        if color_augment:
-            stn_images = color_augment(stn_images)
+            # if color_augment:
+            #     stn_images = color_augment(stn_images)
 
-        teacher_output = teacher(stn_images[:2])  # only the 2 global views pass through the teacher
-        student_output = student(stn_images)
-        dino = dino_loss(student_output, teacher_output, epoch)
-        loss = dino + penalty
+            teacher_output = teacher(images)
+            student_output = student(stn_images)
+            dino = loss_fn(student_output, teacher_output, epoch)
+            loss = dino + penalty
 
-        if not penalty.isfinite():
-            print("Penalty is {}, stopping training".format(penalty.item()), force=True)
-            sys.exit(2)
+            if not penalty.isfinite():
+                print("Penalty is {}, stopping training".format(penalty.item()), force=True)
+                sys.exit(2)
 
-        if not dino.isfinite():
-            print("DINOLoss is {}, stopping training".format(dino.item()), force=True)
-            sys.exit(2)
+            if not dino.isfinite():
+                print("DINOLoss is {}, stopping training".format(dino.item()), force=True)
+                sys.exit(2)
 
-        stn_optimizer.zero_grad()
-        loss.backward()
-        param_norms = torch.nn.utils.clip_grad_norm_(stn.parameters(), args.clip_grad)
-        stn_optimizer.step()
+            stn_optimizer.zero_grad()
+            loss.backward()
+            param_norms = torch.nn.utils.clip_grad_norm_(stn.parameters(), args.clip_grad)
+            stn_optimizer.step()
 
-        # logging
-        torch.cuda.synchronize()
-        metric_logger.update(loss=loss.item())
-        metric_logger.update(dino=dino.item())
-        metric_logger.update(norms=param_norms)
-        metric_logger.update(penalty=penalty.item())
+            # logging
+            torch.cuda.synchronize()
+            metric_logger.update(loss=loss.item())
+            metric_logger.update(dino=dino.item())
+            metric_logger.update(norms=param_norms)
+            metric_logger.update(penalty=penalty.item())
 
-        if utils.is_main_process():
-            summary_writer.add_scalar(tag="stn training: loss", scalar_value=loss.item(), global_step=it)
-            summary_writer.add_scalar(tag="stn training: dino", scalar_value=dino.item(), global_step=it)
-            summary_writer.add_scalar(tag="stn training: grad norm (stn)", scalar_value=param_norms, global_step=it)
-            summary_writer.add_scalar(tag="stn training: penalty", scalar_value=penalty.item(), global_step=it)
-            summary_writer.add_scalar(tag="stn training: lr stn", scalar_value=stn_optimizer.param_groups[0]["lr"], global_step=it)
-            tmp = torch.stack([torch.det(theta[:, :, :2].float()).abs() for theta in thetas[:2]])
-            scale = tmp.mean()
-            std = tmp.std(0).mean()
-            summary_writer.add_scalar(tag="scale global - mean", scalar_value=scale.item(), global_step=it)
-            summary_writer.add_scalar(tag="scale global - std", scalar_value=std.item(), global_step=it)
-            tmp = torch.stack([torch.det(theta[:, :, :2].float()).abs() for theta in thetas[2:]])
-            scale = tmp.mean()
-            std = tmp.std(0).mean()
-            summary_writer.add_scalar(tag="scale local - mean", scalar_value=scale.item(), global_step=it)
-            summary_writer.add_scalar(tag="scale local - std", scalar_value=std.item(), global_step=it)
+            if utils.is_main_process():
+                summary_writer.add_scalar(tag="stn training: loss", scalar_value=loss.item(), global_step=it)
+                summary_writer.add_scalar(tag="stn training: dino", scalar_value=dino.item(), global_step=it)
+                summary_writer.add_scalar(tag="stn training: grad norm (stn)", scalar_value=param_norms, global_step=it)
+                summary_writer.add_scalar(tag="stn training: penalty", scalar_value=penalty.item(), global_step=it)
+                summary_writer.add_scalar(tag="stn training: lr stn", scalar_value=stn_optimizer.param_groups[0]["lr"], global_step=it)
+                tmp = torch.stack([torch.det(theta[:, :, :2].float()).abs() for theta in thetas[:2]])
+                scale = tmp.mean()
+                std = tmp.std(0).mean()
+                summary_writer.add_scalar(tag="scale global - mean", scalar_value=scale.item(), global_step=it)
+                summary_writer.add_scalar(tag="scale global - std", scalar_value=std.item(), global_step=it)
+                tmp = torch.stack([torch.det(theta[:, :, :2].float()).abs() for theta in thetas[2:]])
+                scale = tmp.mean()
+                std = tmp.std(0).mean()
+                summary_writer.add_scalar(tag="scale local - mean", scalar_value=scale.item(), global_step=it)
+                summary_writer.add_scalar(tag="scale local - std", scalar_value=std.item(), global_step=it)
 
-        # Print gradients to STDOUT
-        if utils.is_main_process() and args.grad_check_freq and it % args.grad_check_freq == 1:
-            utils.print_gradients(stn)
+            # Print gradients to STDOUT
+            if utils.is_main_process() and args.grad_check_freq and it % args.grad_check_freq == 1:
+                utils.print_gradients(stn)
 
-    # gather the stats from all processes
-    metric_logger.synchronize_between_processes()
-    print("Averaged stats:", metric_logger)
+        # gather the stats from all processes
+        metric_logger.synchronize_between_processes()
+        print("Averaged stats:", metric_logger)
 
 
 def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loader,
@@ -424,13 +433,9 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
             fp16_scaler.scale(loss).backward()
             if args.clip_grad:
                 fp16_scaler.unscale_(optimizer)  # unscale the gradients of optimizer's assigned params in-place
-                torch.nn.utils.clip_grad_norm_(student.parameters(), args.clip_grad)
-                fp16_scaler.unscale_(stn_optimizer) if stn_optimizer else None
-                param_norms = torch.nn.utils.clip_grad_norm_(stn.parameters(), args.clip_grad)
+                param_norms = torch.nn.utils.clip_grad_norm_(student.parameters(), args.clip_grad)
             utils.cancel_gradients_last_layer(epoch, student, args.freeze_last_layer)
             fp16_scaler.step(optimizer)
-            if stn_optimizer:
-                fp16_scaler.step(stn_optimizer)
             fp16_scaler.update()
 
         # EMA update for the teacher
@@ -487,6 +492,62 @@ class DINOLoss(nn.Module):
         temp = self.teacher_temp_schedule[epoch]
         teacher_out = F.softmax((teacher_output - self.center) / temp, dim=-1)
         teacher_out = teacher_out.detach().chunk(2)
+
+        total_loss = 0
+        n_loss_terms = 0
+        for iq, q in enumerate(teacher_out):
+            for v in range(len(student_out)):
+                if v == iq:
+                    # we skip cases where student and teacher operate on the same view
+                    continue
+                loss = torch.sum(-q * F.log_softmax(student_out[v], dim=-1), dim=-1)
+                total_loss += loss.mean()
+                n_loss_terms += 1
+        total_loss /= n_loss_terms
+        self.update_center(teacher_output)
+        return total_loss
+
+    @torch.no_grad()
+    def update_center(self, teacher_output):
+        """
+        Update center used for teacher output.
+        """
+        batch_center = torch.sum(teacher_output, dim=0, keepdim=True)
+        dist.all_reduce(batch_center)
+        batch_center = batch_center / (len(teacher_output) * dist.get_world_size())
+
+        # ema update
+        self.center = self.center * self.center_momentum + batch_center * (1 - self.center_momentum)
+
+
+class DINOLossSTN(nn.Module):
+    def __init__(self, out_dim, ncrops, warmup_teacher_temp, teacher_temp,
+                 warmup_teacher_temp_epochs, nepochs, student_temp=0.1,
+                 center_momentum=0.9):
+        super().__init__()
+        self.student_temp = student_temp
+        self.center_momentum = center_momentum
+        self.ncrops = ncrops
+        self.register_buffer("center", torch.zeros(1, out_dim))
+        # we apply a warm up for the teacher temperature because
+        # a too high temperature makes the training instable at the beginning
+        self.teacher_temp_schedule = np.concatenate((
+            np.linspace(warmup_teacher_temp,
+                        teacher_temp, warmup_teacher_temp_epochs),
+            np.ones(nepochs - warmup_teacher_temp_epochs) * teacher_temp
+        ))
+
+    def forward(self, student_output, teacher_output, epoch):
+        """
+        Cross-entropy between softmax outputs of the teacher and student networks.
+        """
+        student_out = student_output / self.student_temp
+        student_out = student_out.chunk(self.ncrops)
+
+        # teacher centering and sharpening
+        temp = self.teacher_temp_schedule[epoch]
+        teacher_out = F.softmax((teacher_output - self.center) / temp, dim=-1)
+        teacher_out = teacher_out.detach().chunk(1)
 
         total_loss = 0
         n_loss_terms = 0
@@ -688,12 +749,14 @@ def get_args_parser():
     parser.add_argument("--min_lcl_overlap", default=0.1, type=float,
                         help="The minimal overlap between two local crops.")
 
-    parser.add_argument("--stn_epochs", default=5, type=int,
+    parser.add_argument("--stn_train_epochs", default=5, type=int,
                         help="Number of epochs that the STN is trained.")
-    parser.add_argument("--alternate", default=30, type=int,
-                        help="Number of epochs that the STN and RRC training for DINO is alternated.")
+    parser.add_argument("--rrc_epochs", default=90, type=int,
+                        help="Number of epochs that the DINO backbone is trained with RRC-images.")
+    parser.add_argument("--stn_epochs", default=10, type=int,
+                        help="Number of epochs that the DINO backbone is trained with STN-images.")
     parser.add_argument("--train_stn_freq", default=30, type=int,
-                        help="How often the stn is trained.")
+                        help="How often the STN is trained.")
 
     return parser
 
