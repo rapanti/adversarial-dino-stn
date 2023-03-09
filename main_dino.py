@@ -45,6 +45,7 @@ penalty_dict = {
     penalty: penalties.__dict__[penalty] for penalty in penalty_list
 }
 
+
 def train_dino(args):
     utils.init_distributed_mode(args)
     utils.fix_random_seeds(args.seed)
