@@ -3,6 +3,8 @@ import torch.nn as nn
 from torch.nn import functional as F
 from torchvision.transforms.functional import resize
 from utils import grad_reverse
+from linearized_multisampler import sampling_helper
+from resnet import resnet18
 
 
 N_PARAMS = {
@@ -82,19 +84,18 @@ class LocNet(nn.Module):
     """
 
     def __init__(self, mode: str = 'affine', invert_gradient: bool = False,
-                 num_heads: int = 4, separate_backbones: bool = False,
-                 conv1: int = 32, conv2: int = 32):
+                 num_heads: int = 4, separate_backbones: bool = False,):
         super().__init__()
         self.mode = mode
         self.invert_gradient = invert_gradient
         self.separate_backbones = separate_backbones
         self.num_heads = num_heads
-        self.feature_dim = conv2 * 8 ** 2
+        self.feature_dim = 512
 
         num_backbones = num_heads if self.separate_backbones else 1
 
         self.backbones = nn.ModuleList(
-            [LocBackbone(conv1, conv2) for _ in range(num_backbones)]
+            [resnet18(0) for _ in range(num_backbones)]
         )
         self.heads = nn.ModuleList(
             [LocHead(self.mode, self.feature_dim) for _ in range(self.num_heads)]
@@ -139,17 +140,19 @@ class STN(nn.Module):
         assert len(resolution) in (1, 2), f"resolution parameter should be of length 1 or 2, but {len(resolution)} with {resolution} is given."
         self.global_res, self.local_res = resolution[0] + resolution[0] if len(resolution) == 1 else resolution
 
+        self.linearized_sampler = sampling_helper.DifferentiableImageSampler('linearized', 'zeros')
+
         self.total_crops_number = 2 + self.local_crops_number
         # Spatial transformer localization-network
         self.localization_net = LocNet(self.mode, self.invert_gradients, self.total_crops_number,
-                                       self.separate_localization_net, self.conv1_depth, self.conv2_depth)
+                                       self.separate_localization_net)
 
     def _get_stn_mode_theta(self, theta, x):  # Fastest
         if self.mode == 'affine':
             theta = theta if self.unbounded_stn else torch.tanh(theta)
             return theta.view(-1, 2, 3)
 
-        out = torch.zeros([x.size(0), 2, 3], dtype=torch.float32, device=x.get_device(), requires_grad=True) + 0
+        out = torch.zeros([x.size(0), 3, 3], dtype=torch.float32, device=x.get_device(), requires_grad=True) + 0
         a, b, tx = [1., 0., 0.]
         c, d, ty = [0., 1., 0.]
 
@@ -181,6 +184,9 @@ class STN(nn.Module):
         out[:, 1, 0] = c
         out[:, 1, 1] = d
         out[:, 1, 2] = ty
+        out[:, 2, 0] = 0
+        out[:, 2, 1] = 0
+        out[:, 2, 2] = 1
         return out
 
     def forward(self, x):
@@ -191,13 +197,11 @@ class STN(nn.Module):
         if self.theta_norm:
             thetas = [theta / torch.linalg.norm(theta, ord=1, dim=2, keepdim=True).clamp(min=1) for theta in thetas]
 
-        align_corners = True
         crops = []
         resolutions = [[self.global_res, self.global_res]] * 2 + \
                       [[self.local_res, self.local_res]] * self.local_crops_number
         for theta, res in zip(thetas, resolutions):
-            grid = F.affine_grid(theta, size=list(x.size()[:2]) + res, align_corners=align_corners)
-            crop = F.grid_sample(x, grid, align_corners=align_corners)
+            crop = self.linearized_sampler.warp_image(x, theta)
             crops.append(crop)
 
         return crops, thetas

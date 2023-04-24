@@ -401,12 +401,12 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
                 summary_writer.add_scalar(tag="lr stn", scalar_value=stn_optimizer.param_groups[0]["lr"],
                                           global_step=it)
             if it % 10 == 0:
-                tmp = torch.stack([torch.det(theta[:, :, :2].float()).abs() for theta in thetas[:2]])
+                tmp = torch.stack([torch.det(theta[:, :2, :2].float()).abs() for theta in thetas[:2]])
                 scale = tmp.mean()
                 std = tmp.std(0).mean()
                 summary_writer.add_scalar(tag="scale global - mean", scalar_value=scale.item(), global_step=it)
                 summary_writer.add_scalar(tag="scale global - std", scalar_value=std.item(), global_step=it)
-                tmp = torch.stack([torch.det(theta[:, :, :2].float()).abs() for theta in thetas[2:]])
+                tmp = torch.stack([torch.det(theta[:, :2, :2].float()).abs() for theta in thetas[2:]])
                 scale = tmp.mean()
                 std = tmp.std(0).mean()
                 summary_writer.add_scalar(tag="scale local - mean", scalar_value=scale.item(), global_step=it)
