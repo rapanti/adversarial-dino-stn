@@ -940,6 +940,9 @@ def print_gradients(stn):
     print("LOCAL HEAD BIAS.GRAD:")
     print(stn.module.transform_net.localization_net.heads[2].linear2.bias.grad.cpu().numpy())
     print()
+    print("BACKBONE CONV1.WEIGHT.GRAD:")
+    print(stn.module.transform_net.localization_net.backbones[0].conv1.weight.grad.cpu().numpy())
+    print()
     print("GRADIENT NORM:")
     print(gradient_norm(stn))
     print("==========================================================================================\n"

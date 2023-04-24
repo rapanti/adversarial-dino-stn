@@ -45,6 +45,7 @@ penalty_dict = {
     penalty: penalties.__dict__[penalty] for penalty in penalty_list
 }
 
+
 def train_dino(args):
     utils.init_distributed_mode(args)
     utils.fix_random_seeds(args.seed)
@@ -152,26 +153,19 @@ def train_dino(args):
     print(f"Student and Teacher are built: they are both {args.arch} network.")
 
     # ============ preparing loss ... ============
-    dino_loss = DINOLoss(
+    dino_loss = BarlowTwinsLoss(
         args.out_dim,
         args.local_crops_number + 2,  # total number of crops = 2 global crops + local_crops_number
-        args.warmup_teacher_temp,
-        args.teacher_temp,
-        args.warmup_teacher_temp_epochs,
-        args.epochs,
     ).cuda()
 
     stn_penalty = penalty_dict[args.stn_penalty](
         invert=args.invert_penalty,
-        eps=args.epsilon,
+        eps=1.,
         target=args.penalty_target,
         local_crops_scale=args.local_crops_scale,
         global_crops_scale=args.global_crops_scale,
         min_glb_overlap=args.min_glb_overlap,
         min_lcl_overlap=args.min_lcl_overlap,
-        resolution=32,
-        exponent=2,
-        bins=100,
     ).cuda() if args.stn_penalty else None
 
     # ============ preparing optimizer ... ============
@@ -332,8 +326,8 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
 
             teacher_output = teacher(stn_images[:2])  # only the 2 global views pass through the teacher
             student_output = student(stn_images)
-            dino = dino_loss(student_output, teacher_output, epoch)
-            loss = dino + penalty
+            dino = dino_loss(student_output, teacher_output)
+            loss = dino + args.epsilon * penalty
 
         if not penalty.isfinite().all():
             print("Penalty is {}, stopping training".format(penalty.item()), force=True)
@@ -420,6 +414,44 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+
+
+class BarlowTwinsLoss(nn.Module):
+    def __init__(self, embed_dim, ncrops, lambd=0.005):
+        super(BarlowTwinsLoss, self).__init__()
+        self.ncrops = ncrops
+        self.lambd = lambd
+        self.bn = nn.BatchNorm1d(embed_dim)
+
+    def forward(self, student_output, teacher_output):
+        b = student_output.size(0)
+        student_out = student_output.chunk(self.ncrops)
+        teacher_out = teacher_output.detach().chunk(2)
+
+        total_loss = 0
+        n_loss_terms = 0
+        for iq, q in enumerate(teacher_out):
+            for iv, v in enumerate(student_out):
+                if iv == iq:
+                    # skip cases where student and teacher operate on the same view
+                    continue
+                c = self.bn(q).T @ self.bn(v)
+                c.div_(b)
+                torch.distributed.all_reduce(c)
+                on_diag = torch.diagonal(c).add_(-1).pow_(2).sum()
+                off_diag = off_diagonal(c).pow_(2).sum()
+                loss = on_diag + self.lambd * off_diag
+                total_loss += loss
+                n_loss_terms += 1
+        total_loss /= n_loss_terms
+        return total_loss
+
+
+def off_diagonal(x):
+    # return a flattened view of the off-diagonal elements of a square matrix
+    n, m = x.shape
+    assert n == m
+    return x.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
 
 
 class DINOLoss(nn.Module):

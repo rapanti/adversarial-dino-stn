@@ -3,7 +3,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 from torchvision.transforms.functional import resize
 from utils import grad_reverse
-
+from resnet import resnet18
 
 N_PARAMS = {
     'affine': 6,
@@ -82,19 +82,18 @@ class LocNet(nn.Module):
     """
 
     def __init__(self, mode: str = 'affine', invert_gradient: bool = False,
-                 num_heads: int = 4, separate_backbones: bool = False,
-                 conv1: int = 32, conv2: int = 32):
+                 num_heads: int = 4, separate_backbones: bool = False,):
         super().__init__()
         self.mode = mode
         self.invert_gradient = invert_gradient
         self.separate_backbones = separate_backbones
         self.num_heads = num_heads
-        self.feature_dim = conv2 * 8 ** 2
+        self.feature_dim = 512
 
         num_backbones = num_heads if self.separate_backbones else 1
 
         self.backbones = nn.ModuleList(
-            [LocBackbone(conv1, conv2) for _ in range(num_backbones)]
+            [resnet18(0) for _ in range(num_backbones)]
         )
         self.heads = nn.ModuleList(
             [LocHead(self.mode, self.feature_dim) for _ in range(self.num_heads)]
@@ -142,7 +141,7 @@ class STN(nn.Module):
         self.total_crops_number = 2 + self.local_crops_number
         # Spatial transformer localization-network
         self.localization_net = LocNet(self.mode, self.invert_gradients, self.total_crops_number,
-                                       self.separate_localization_net, self.conv1_depth, self.conv2_depth)
+                                       self.separate_localization_net)
 
     def _get_stn_mode_theta(self, theta, x):  # Fastest
         if self.mode == 'affine':
