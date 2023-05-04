@@ -27,6 +27,7 @@ import torch.backends.cudnn as cudnn
 import torch.nn.functional as F
 from torch.utils.data import DistributedSampler, DataLoader
 import kornia.augmentation as K
+from kornia.geometry.transform import resize
 
 import utils
 import vision_transformer as vits
@@ -262,12 +263,9 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
         # teacher and student forward passes + compute dino loss
         with torch.cuda.amp.autocast(fp16_scaler is not None):
             out = patch_net(images)
-            if args.invert_gradients:
-                out = utils.grad_reverse(out)
+            out = [patch.squeeze() for patch in out]
 
-            patches = out.chunk(args.local_crops_number, dim=1)
-            patches = [patch.squeeze() for patch in patches]
-            patches = [rcrop(images), rcrop(images)] + patches
+            patches = [resize(out[0], 32), resize(out[1], 32)] + [resize(o, 16) for o in out[2:]]
 
             if utils.is_main_process() and args.summary_writer_freq and it % args.summary_writer_freq == 0:
                 summary_writer.write_image_grid("images", images=patches, original_images=images,
@@ -492,7 +490,8 @@ def get_args_parser():
                         choices=["random", "hard-topk", "topk", "perturbed-topk"],
                         help="Whether or not to use color augmentations")
     parser.add_argument("--pnet_patch_size", default=16, type=int, help="Size of the patches from the images.")
-    parser.add_argument("--use_scorer_se", default=False, type=int, help="Use SqueezeExciteLayer in ScorerNet.")
+    parser.add_argument("--use_scorer_se", default=False, type=utils.bool_flag,
+                        help="Whether or not to use SqueezeExciteLayer in ScorerNet.")
     parser.add_argument("--normalization_str", default="identity", type=str,
                         help="""String specifying the normalization of the scores.""")
     parser.add_argument("--invert_gradients", default=False, type=utils.bool_flag)

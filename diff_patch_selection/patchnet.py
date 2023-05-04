@@ -1,6 +1,7 @@
 import enum
 
 import einops
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as f
@@ -47,7 +48,7 @@ class Scorer(nn.Module):
             nn.ReLU(inplace=True),
             SqueezeExciteLayer(32) if use_excite else nn.Identity(),
             nn.Conv2d(32, 1, 3),
-            nn.MaxPool2d(4, 4),
+            nn.MaxPool2d(8, 8),
         )
 
     def forward(self, x):
@@ -84,71 +85,21 @@ class PatchNet(nn.Module):
     def forward(self, x):
         bs, c, h, w = x.shape
 
-        # === Compute the scores ===
-        if self.selection_method == SelectionMethod.RANDOM:
-            scores_h, scores_w = Scorer.compute_output_size(h, w)
-            num_patches = scores_h * scores_w
-        else:
-            scores = self.scorer(x)
-            flatten_scores = scores.flatten(1)
-            num_patches = flatten_scores.size(-1)
-            scores_h, scores_w = scores.shape[-2:]
+        low = h // 4
+        mid = 2 * h // 3
+        # Randomize patch size
+        patch_size = np.append(np.random.choice(range(mid, h+1), 2),
+                               np.random.choice(range(low, mid), self.k))
+        score_size = (h - patch_size + 1)
+        num_patches = score_size ** 2
 
-            # prob_scores = f.softmax(flatten_scores, dim=-1)
-
-            flatten_scores = self.norm_fn(flatten_scores)
-
-            # scores = flatten_scores.reshape(scores.shape)
-
-        # === Patch Selection ===
-        if self.selection_method is SelectionMethod.SINKHORN_TOPK:
-            indicators = self.topk_fn(flatten_scores)
-            indicators = einops.rearrange(indicators, "b n k -> b k n")
-        elif self.selection_method is SelectionMethod.PERTURBED_TOPK:
-            topk_fn = PerturbedTopK(self.k)
-            indicators = topk_fn(flatten_scores)
-        elif self.selection_method is SelectionMethod.HARD_TOPK:
-            indices = select_patches_hard_topk(flatten_scores, self.k)
-        elif self.selection_method is SelectionMethod.RANDOM:
-            rows = [torch.multinomial(input=torch.ones(num_patches), num_samples=self.k, replacement=False) for _ in
-                    range(bs)]
-            indices = torch.stack(rows).to(x.device)
-
-        # Randomly use hard topk at training
-        if self.training and self.hard_topk_probability > 0 and \
-                    self.selection_method not in [SelectionMethod.HARD_TOPK, SelectionMethod.RANDOM]:
-            true_indices = select_patches_hard_topk(flatten_scores, self.k)
-            random_values = torch.rand(bs, device=x.device)
-            use_hard = random_values < self.hard_topk_probability
-            if self.extract_by_indices:
-                indices = torch.where(use_hard[:, None], true_indices, indices)
-            else:
-                true_indicators = f.one_hot(true_indices, num_classes=num_patches).float()
-                indicators = torch.where(use_hard[:, None, None], true_indicators, indicators)
-
-        # Sample some random patches during training with random_patch_probability.
-        if self.training and self.random_patch_probability > 0 and \
-                self.selection_method is not SelectionMethod.RANDOM:
-            rows = [torch.multinomial(input=torch.ones(num_patches), num_samples=self.k, replacement=False) for _ in
-                    range(bs)]
-            random_indices = torch.stack(rows).to(x.device)
-            random_values = torch.rand(bs, self.k)
-            use_random = random_values < self.random_patch_probability
-            if self.extract_by_indices:
-                indices = torch.where(use_random, random_indices, indices)
-            else:
-                random_indicators = f.one_hot(random_indices, num_classes=num_patches).float()
-                indicators = torch.where(use_random[:, None, :], random_indicators, indicators)
+        indices = [f.one_hot(torch.multinomial(torch.ones(bs, n_p), 1), n_p).float().to(x.device)
+                   for n_p in num_patches]
 
         # === Patch extraction ===
-        if self.extract_by_indices:
-            patches = extract_patches_from_indices(
-                x, indices,
-                patch_size=self.patch_size, grid_shape=(scores_h, scores_w))
-        else:
-            patches = extract_patches_from_indicators(
-                x, indicators,
-                self.patch_size, grid_shape=(scores_h, scores_w))
+        patches = extract_patches_from_indices(
+            x, indices, patch_size=patch_size, grid_shape=score_size)
+
         return patches
 
 
@@ -182,20 +133,17 @@ def extract_patches_from_indicators(x, indicators, patch_size, grid_shape):
 
 def extract_patches_from_indices(x, indices, patch_size, grid_shape):
     bs, c, h, w = x.shape
-    scores_h, scores_w = grid_shape
-    num_patches = scores_h * scores_w
-    indices = f.one_hot(indices, num_classes=num_patches).float()
 
-    stride_h, stride_w, pad_h, pad_w = calculate_stride_pad(h, w, patch_size, scores_h, scores_w)
-    padded_x = f.pad(x, (pad_h, pad_w, pad_h, pad_w))
-    patches = tools.extract_images_patches(
-        padded_x,
-        window_size=(patch_size, patch_size),
-        stride=(stride_h, stride_w)
-    )
-    patches = torch.einsum("b k n, b n c i j -> b k c i j", indices, patches)
+    crops = []
+    for ps, gs, index in zip(patch_size, grid_shape, indices):
+        # stride_h, stride_w, pad_h, pad_w = calculate_stride_pad(h, w, ps, gs, gs)
+        # padded_x = f.pad(x, (pad_h, pad_w, pad_h, pad_w))
+        concatenated_patches = f.unfold(x, kernel_size=ps, stride=1)
+        patches = einops.rearrange(concatenated_patches, "b (c i j) n -> b n c i j", c=c, i=ps, j=ps)
+        patches = torch.einsum("b k n, b n c i j -> b k c i j", index, patches)
+        crops.append(patches)
 
-    return patches
+    return crops
 
 
 def _get_available_normalization_fns():
@@ -251,24 +199,25 @@ if __name__ == "__main__":
     image, _ = cifar.__getitem__(0)
     x = image.unsqueeze(0)
 
-    patch_net = PatchNet(16, 4, False, "topk", "zerooneeps(1e-4)", 0.)
+    patch_net = PatchNet(16, 4, False, "random", "zerooneeps(1e-5)", 0., 0.)
 
     out = patch_net(x)
 
-    chunked_out = out.chunk(6, dim=1)
-    for chunk in chunked_out:
-        print(chunk.grad_fn)
-    images = [toPIL(img.squeeze()) for img in chunked_out]
+    for q in out:
+        print(q.shape)
+
+    # chunked_out = out.chunk(6, dim=1)
+    images = [toPIL(img.squeeze()) for img in out]
 
     plot(images)
     plt.show()
 
-    loss_fn = nn.MSELoss()
-    target = torch.zeros_like(out)
-
-    patch_net.zero_grad()
-
-    loss = loss_fn(target, out)
-    loss.backward()
-
-    print(loss)
+    # loss_fn = nn.MSELoss()
+    # target = torch.zeros_like(out)
+    #
+    # patch_net.zero_grad()
+    #
+    # loss = loss_fn(target, out)
+    # loss.backward()
+    #
+    # print(loss)
