@@ -34,11 +34,12 @@ import torch
 from torch import nn
 import torch.distributed as dist
 from torchvision import datasets, transforms
-from PIL import ImageFilter, ImageOps
 from torchvision.transforms import InterpolationMode
 from torch.utils.tensorboard import SummaryWriter
+from PIL import ImageFilter, ImageOps
 import matplotlib
 import matplotlib.pyplot as plt
+import kornia.augmentation as k
 
 
 def load_stn_pretrained_weights(model, pretrained_weights):
@@ -879,36 +880,33 @@ def build_transform(args):
 class ColorAugmentation(object):
     def __init__(self, dataset):
         if dataset == "CIFAR10":
-            normalize = transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+            normalize = k.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])
         elif dataset == "ImageNet":
-            normalize = transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+            normalize = k.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
         else:
-            normalize = transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+            normalize = k.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
 
-        color_jitter = transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1)
-        gaussian_blur = transforms.GaussianBlur(3, (0.1, 2.0))
-
-        self.transform_global1 = transforms.Compose([
-            transforms.RandomApply([color_jitter], p=0.8),
-            transforms.RandomGrayscale(p=0.2),
-            transforms.RandomApply([gaussian_blur], p=1.0),
+        self.transform_global1 = k.AugmentationSequential(
+            k.ColorJiggle(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1, p=0.8),
+            k.RandomGrayscale(p=0.2),
+            k.RandomGaussianBlur((3, 3), (0.1, 2.0), p=1),
             normalize,
-        ])
+        )
 
-        self.transform_global2 = transforms.Compose([
-            transforms.RandomApply([color_jitter], p=0.8),
-            transforms.RandomGrayscale(p=0.2),
-            transforms.RandomApply([gaussian_blur], p=0.1),
-            transforms.RandomSolarize(0.5, p=0.2),
+        self.transform_global2 = k.AugmentationSequential(
+            k.ColorJiggle(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1, p=0.8),
+            k.RandomGrayscale(p=0.2),
+            k.RandomGaussianBlur((3, 3), (0.1, 2.0), p=0.1),
+            k.RandomSolarize(0.5, p=0.2),
             normalize,
-        ])
+        )
 
-        self.transform_local = transforms.Compose([
-            transforms.RandomApply([color_jitter], p=0.8),
-            transforms.RandomGrayscale(p=0.2),
-            transforms.RandomApply([gaussian_blur], p=0.5),
+        self.transform_local = k.AugmentationSequential(
+            k.ColorJiggle(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1, p=0.8),
+            k.RandomGrayscale(p=0.2),
+            k.RandomGaussianBlur((3, 3), (0.1, 2.0), p=0.5),
             normalize,
-        ])
+        )
 
     def __call__(self, images):
         crops = [self.transform_global1(images[0]), self.transform_global2(images[1])]
@@ -924,24 +922,15 @@ def gradient_norm(model):
     return 0.
 
 
-def print_gradients(stn):
+def print_gradients(net):
     print("==========================================================================================\n"
           "###                           STN WEIGHTS AND GRADIENTS                                ###\n"
           "==========================================================================================\n")
-    print("GLOBAL HEAD BIAS.DATA:")
-    print(stn.module.transform_net.localization_net.heads[0].linear2.bias.data.cpu().numpy())
+    print("SCORER CONV1 WEIGHT.GRAD:")
+    print(net.module.scorer.model[0].weight.grad.cpu().numpy())
     print()
-    print("GLOBAL HEAD BIAS.GRAD:")
-    print(stn.module.transform_net.localization_net.heads[0].linear2.bias.grad.cpu().numpy())
-    print()
-    print("LOCAL HEAD BIAS.DATA:")
-    print(stn.module.transform_net.localization_net.heads[2].linear2.bias.data.cpu().numpy())
-    print()
-    print("LOCAL HEAD BIAS.GRAD:")
-    print(stn.module.transform_net.localization_net.heads[2].linear2.bias.grad.cpu().numpy())
-    print()
-    print("GRADIENT NORM:")
-    print(gradient_norm(stn))
+    print("SCORER CONV2 WEIGHT.GRAD:")
+    print(net.module.scorer.model[2].weight.grad.cpu().numpy())
     print("==========================================================================================\n"
           "###                                        END                                         ###\n"
           "==========================================================================================")
@@ -977,12 +966,13 @@ def summary_writer_write_images_thetas(summary_writer, stn_images, images, theta
 def image_grid(images, original_images, epoch, plot_size=16):
     """Return a 5x5 grid of the MNIST images as a matplotlib figure."""
     # Create a figure to contain the plot.
+    topil = transforms.ToPILImage()
     x = len(images) + 1
     num_images = min(len(original_images), plot_size)
     figure = plt.figure(figsize=(x, num_images))
     plt.subplots_adjust(hspace=0.5)
 
-    titles = [f"orig@{epoch}", "global 1", "global 2"] + [f"local {n+1}" for n in range(len(images))]
+    titles = [f"orig@{epoch}"] + [f"patch {n+1}" for n in range(len(images))]
     total = 0
     for i in range(num_images):  # orig_img in enumerate(original_images, 1):
         all_images = [original_images[i]] + [img[i] for img in images]
@@ -994,16 +984,9 @@ def image_grid(images, original_images, epoch, plot_size=16):
             plt.yticks([])
             plt.grid(False)
 
-            img = all_images[j].cpu().detach().numpy()
+            img = topil(all_images[j].detach().cpu())
 
-            if img.shape[0] == 3:
-                # CIFAR100 and ImageNet case
-                img = np.moveaxis(img, 0, -1)
-            else:
-                # MNIST case
-                img = img.squeeze()
-
-            plt.imshow(np.clip(img, 0, 1))
+            plt.imshow(img)
     figure.tight_layout()
     return figure
 
