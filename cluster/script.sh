@@ -15,7 +15,7 @@ echo "Running job $SLURM_JOB_NAME with given JID $SLURM_JOB_ID on queue $SLURM_J
 source /home/rapanti/.profile
 source activate dino
 
-EXP_D=/work/dlclarge2/rapanti-metassl-dino-stn/experiments/diff_patch_select-topk-default
+EXP_D=/work/dlclarge2/rapanti-metassl-dino-stn/experiments/rrc-patch-net-default
 
 # Job to perform
 torchrun \
@@ -38,7 +38,7 @@ torchrun \
       --saveckp_freq 100 \
       --invert_gradients true \
       --color_augment true \
-      --selection_method topk \
+      --selection_method random \
       --pnet_patch_size 16 \
       --use_scorer_se False \
       --normalization_str "zerooneeps(1e-5)" \
@@ -46,7 +46,7 @@ torchrun \
       --hard_topk_probability 0 \
       --random_patch_probability 0 \
       --summary_writer_freq 100 \
-      --grad_check_freq 100
+      --grad_check_freq 0
 
 # Print some Information about the end-time to STDOUT
 echo "DONE";
