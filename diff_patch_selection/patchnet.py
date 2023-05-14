@@ -1,6 +1,7 @@
 import enum
 
 import einops
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as f
@@ -35,7 +36,7 @@ class SqueezeExciteLayer(nn.Module):
 
 
 class Scorer(nn.Module):
-    def __init__(self, use_excite: bool = False, in_channels: int = 3):
+    def __init__(self, use_excite=False, pool_size=4, in_channels=3):
         super().__init__()
         self.model = nn.Sequential(
             nn.Conv2d(in_channels, 8, 3),
@@ -47,15 +48,15 @@ class Scorer(nn.Module):
             nn.ReLU(inplace=True),
             SqueezeExciteLayer(32) if use_excite else nn.Identity(),
             nn.Conv2d(32, 1, 3),
-            nn.MaxPool2d(4, 4),
+            nn.MaxPool2d(pool_size, pool_size),
         )
 
     def forward(self, x):
         return self.model(x)
 
     @classmethod
-    def compute_output_size(cls, height, width):
-        return (height - 8) // 4, (width - 8) // 4
+    def compute_output_size(cls, height, width, pool_size):
+        return (height - 8) // pool_size, (width - 8) // pool_size
 
 
 class PatchNet(nn.Module):
@@ -84,6 +85,11 @@ class PatchNet(nn.Module):
     def forward(self, x):
         bs, c, h, w = x.shape
 
+        low = h // 4
+        mid = 2 * h // 3
+        # Randomize patch size
+        patch_size = np.random.choice(range(low, mid), self.k)
+
         # === Compute the scores ===
         if self.selection_method == SelectionMethod.RANDOM:
             scores_h, scores_w = Scorer.compute_output_size(h, w)
@@ -95,9 +101,7 @@ class PatchNet(nn.Module):
             scores_h, scores_w = scores.shape[-2:]
 
             # prob_scores = f.softmax(flatten_scores, dim=-1)
-
             flatten_scores = self.norm_fn(flatten_scores)
-
             # scores = flatten_scores.reshape(scores.shape)
 
         # === Patch Selection ===
@@ -114,9 +118,12 @@ class PatchNet(nn.Module):
                     range(bs)]
             indices = torch.stack(rows).to(x.device)
 
+        indicators = zerooneeps(indicators.exp().exp().exp())
+        indicators = indicators / indicators.sum(dim=-1, keepdims=True)
+
         # Randomly use hard topk at training
         if self.training and self.hard_topk_probability > 0 and \
-                    self.selection_method not in [SelectionMethod.HARD_TOPK, SelectionMethod.RANDOM]:
+                self.selection_method not in [SelectionMethod.HARD_TOPK, SelectionMethod.RANDOM]:
             true_indices = select_patches_hard_topk(flatten_scores, self.k)
             random_values = torch.rand(bs, device=x.device)
             use_hard = random_values < self.hard_topk_probability
@@ -148,7 +155,7 @@ class PatchNet(nn.Module):
         else:
             patches = extract_patches_from_indicators(
                 x, indicators,
-                self.patch_size, grid_shape=(scores_h, scores_w))
+                patch_size, grid_shape=(scores_h, scores_w))
         return patches
 
 
@@ -159,23 +166,30 @@ def select_patches_hard_topk(scores, k):
 def calculate_stride_pad(h, w, patch_size, scores_h, scores_w):
     stride_h = round((h - patch_size) / (scores_h - 1))
     stride_w = round((w - patch_size) / (scores_w - 1))
-    pad_h = abs(stride_h * (scores_h - 1) + patch_size - h) // 2
-    pad_w = pad_h + abs(stride_w * (scores_w - 1) + patch_size - w) % 2
-    return stride_h, stride_w, pad_h, pad_w
+    padding = stride_h * (scores_h - 1) + patch_size - h
+    pad_l = padding // 2 if padding else 0
+    pad_r = padding % 2 + pad_l if padding else 0
+    return stride_h, stride_w, pad_l, pad_r
 
 
 def extract_patches_from_indicators(x, indicators, patch_size, grid_shape):
     bs, c, h, w = x.shape
     scores_h, scores_w = grid_shape
-
-    stride_h, stride_w, pad_h, pad_w = calculate_stride_pad(h, w, patch_size, scores_h, scores_w)
-    padded_x = f.pad(x, (pad_h, pad_w, pad_h, pad_w))
-    patches = tools.extract_images_patches(
-        padded_x,
-        window_size=(patch_size, patch_size),
-        stride=(stride_h, stride_w)
-    )
-    patches = torch.einsum("b k n, b n c i j -> b k c i j", indicators, patches)
+    chunks = indicators.size(1)
+    patches = []
+    for indicator, ps in zip(indicators.chunk(chunks, dim=1), patch_size):
+        print(ps)
+        stride_h, stride_w, pad_h, pad_w = calculate_stride_pad(h, w, ps, scores_h, scores_w)
+        print(stride_h, stride_w, pad_h, pad_w)
+        padded_x = f.pad(x, (pad_h, pad_w, pad_h, pad_w))
+        patch = tools.extract_images_patches(
+            padded_x,
+            window_size=(ps, ps),
+            stride=(stride_h, stride_w)
+        )
+        print(patch.shape)
+        patch = torch.einsum("b k n, b n c i j -> b k c i j", indicator, patch)
+        patches.append(patch)
 
     return patches
 
@@ -226,7 +240,15 @@ def _get_available_normalization_fns():
         smoothing=smoothing,
         zeroone=zeroone,
         zerooneeps=zerooneeps,
-        sigmoid=nn.Sigmoid(), )
+        sigmoid=nn.Sigmoid(),
+        exp=torch.exp,
+    )
+
+
+def zerooneeps(scores, eps=1e-5):
+    scores_min = scores.min(dim=-1, keepdim=True).values
+    scores_max = scores.max(dim=-1, keepdim=True).values
+    return (scores - scores_min) / (scores_max - scores_min + eps)
 
 
 def create_normalization_fn(fn_str):
@@ -237,28 +259,27 @@ def create_normalization_fn(fn_str):
         for fn in functions:
             x = fn(x)
         return x
+
     return chain
 
 
 if __name__ == "__main__":
     from torchvision import transforms, datasets
-    from tests.plot_script import plot
+    from tests.plot_scripts import plot
     import matplotlib.pyplot as plt
 
     toPIL = transforms.ToPILImage()
-    cifar = datasets.CIFAR10("../../datasets/CIFAR10", transform=transforms.ToTensor())
+    cifar = datasets.CIFAR10("../../../datasets/cifar10", transform=transforms.ToTensor())
 
-    image, _ = cifar.__getitem__(0)
+    image, _ = cifar.__getitem__(11)
     x = image.unsqueeze(0)
 
-    patch_net = PatchNet(16, 4, False, "topk", "zerooneeps(1e-4)", 0.)
+    patch_net = PatchNet(16, 4, False, "perturbed-topk", "exp|exp|zerooneeps(1e-4)", 0., 0)
 
     out = patch_net(x)
 
-    chunked_out = out.chunk(6, dim=1)
-    for chunk in chunked_out:
-        print(chunk.grad_fn)
-    images = [toPIL(img.squeeze()) for img in chunked_out]
+    # chunked_out = out.chunk(6, dim=1)
+    images = [toPIL(image)] + [toPIL(img.squeeze()) for img in out]
 
     plot(images)
     plt.show()

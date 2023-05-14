@@ -2,9 +2,9 @@
 #SBATCH -p mlhiwidlc_gpu-rtx2080-advanced # partition (queue)
 #SBATCH -t 23:59:59 # time (D-HH:MM:SS)
 #SBATCH --gres=gpu:4
-#SBATCH -J diff_patch_select-topk-default # sets the job name. If not specified, the file name will be used as job name
-#SBATCH -o /work/dlclarge2/rapanti-metassl-dino-stn/experiments/diff_patch_select-topk-default/log/%A.%a.%N.out  # STDOUT
-#SBATCH -e /work/dlclarge2/rapanti-metassl-dino-stn/experiments/diff_patch_select-topk-default/log/%A.%a.%N.out  # STDERR
+#SBATCH -J diff_patch_select-perturbed-topk-default # sets the job name. If not specified, the file name will be used as job name
+#SBATCH -o /work/dlclarge2/rapanti-metassl-dino-stn/experiments/diff_patch_select-perturbed-topk-default/log/%A.%a.%N.out  # STDOUT
+#SBATCH -e /work/dlclarge2/rapanti-metassl-dino-stn/experiments/diff_patch_select-perturbed-topk-default/log/%A.%a.%N.out  # STDERR
 #SBATCH --array 0-3%1
 
 # Print some information about the job to STDOUT
@@ -15,7 +15,7 @@ echo "Running job $SLURM_JOB_NAME with given JID $SLURM_JOB_ID on queue $SLURM_J
 source /home/rapanti/.profile
 source activate dino
 
-EXP_D=/work/dlclarge2/rapanti-metassl-dino-stn/experiments/diff_patch_select-topk-default
+EXP_D=/work/dlclarge2/rapanti-metassl-dino-stn/experiments/diff_patch_select-perturbed-topk-default
 
 # Job to perform
 torchrun \
@@ -38,10 +38,10 @@ torchrun \
       --saveckp_freq 100 \
       --invert_gradients true \
       --color_augment true \
-      --selection_method topk \
+      --selection_method perturbed-topk \
       --pnet_patch_size 16 \
       --use_scorer_se False \
-      --normalization_str "zerooneeps(1e-5)" \
+      --normalization_str "exp|exp|zerooneeps(1e-5)" \
       --invert_gradients True \
       --hard_topk_probability 0 \
       --random_patch_probability 0 \
