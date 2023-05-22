@@ -39,6 +39,7 @@ from torchvision.transforms import InterpolationMode
 from torch.utils.tensorboard import SummaryWriter
 import matplotlib
 import matplotlib.pyplot as plt
+import kornia.augmentation as korn
 
 
 def load_stn_pretrained_weights(model, pretrained_weights):
@@ -929,19 +930,16 @@ def print_gradients(stn):
           "###                           STN WEIGHTS AND GRADIENTS                                ###\n"
           "==========================================================================================\n")
     print("GLOBAL HEAD BIAS.DATA:")
-    print(stn.module.transform_net.localization_net.heads[0].linear2.bias.data.cpu().numpy())
+    print(stn.module.localization_net.heads[0].linear2.bias.data.cpu().numpy())
     print()
     print("GLOBAL HEAD BIAS.GRAD:")
-    print(stn.module.transform_net.localization_net.heads[0].linear2.bias.grad.cpu().numpy())
+    print(stn.module.localization_net.heads[0].linear2.bias.grad.cpu().numpy())
     print()
     print("LOCAL HEAD BIAS.DATA:")
-    print(stn.module.transform_net.localization_net.heads[2].linear2.bias.data.cpu().numpy())
+    print(stn.module.localization_net.heads[2].linear2.bias.data.cpu().numpy())
     print()
     print("LOCAL HEAD BIAS.GRAD:")
-    print(stn.module.transform_net.localization_net.heads[2].linear2.bias.grad.cpu().numpy())
-    print()
-    print("GRADIENT NORM:")
-    print(gradient_norm(stn))
+    print(stn.module.localization_net.heads[2].linear2.bias.grad.cpu().numpy())
     print("==========================================================================================\n"
           "###                                        END                                         ###\n"
           "==========================================================================================")
@@ -963,15 +961,17 @@ class SummaryWriterCustom(SummaryWriter):
 
 
 def summary_writer_write_images_thetas(summary_writer, stn_images, images, thetas, epoch, it):
-    theta_g1 = thetas[0][0].cpu().detach().numpy()
-    theta_g2 = thetas[1][0].cpu().detach().numpy()
-    theta_l1 = thetas[2][0].cpu().detach().numpy()
-    theta_l2 = thetas[3][0].cpu().detach().numpy()
-    summary_writer.write_image_grid(tag="images", images=stn_images, original_images=images, epoch=epoch, global_step=it)
-    summary_writer.write_theta_heatmap(tag="theta_g1", theta=theta_g1, epoch=epoch, global_step=it)
-    summary_writer.write_theta_heatmap(tag="theta_g2", theta=theta_g2, epoch=epoch, global_step=it)
-    summary_writer.write_theta_heatmap(tag="theta_l1", theta=theta_l1, epoch=epoch, global_step=it)
-    summary_writer.write_theta_heatmap(tag="theta_l2", theta=theta_l2, epoch=epoch, global_step=it)
+    if thetas is not None:
+        theta_g1 = thetas[0][0].cpu().detach().numpy()
+        theta_g2 = thetas[1][0].cpu().detach().numpy()
+        theta_l1 = thetas[2][0].cpu().detach().numpy()
+        theta_l2 = thetas[3][0].cpu().detach().numpy()
+        summary_writer.write_theta_heatmap(tag="theta_g1", theta=theta_g1, epoch=epoch, global_step=it)
+        summary_writer.write_theta_heatmap(tag="theta_g2", theta=theta_g2, epoch=epoch, global_step=it)
+        summary_writer.write_theta_heatmap(tag="theta_l1", theta=theta_l1, epoch=epoch, global_step=it)
+        summary_writer.write_theta_heatmap(tag="theta_l2", theta=theta_l2, epoch=epoch, global_step=it)
+    if stn_images is not None:
+        summary_writer.write_image_grid(tag="images", images=stn_images, original_images=images, epoch=epoch, global_step=it)
 
 
 def image_grid(images, original_images, epoch, plot_size=16):
@@ -1014,6 +1014,13 @@ def theta_heatmap(theta, epoch):
     sns.heatmap(theta, annot=True)
     ax.set_title(f'Theta @ {epoch} epoch')
     return figure
+
+
+def random_crop(x, n):
+    g_crop = korn.RandomResizedCrop((32, 32))
+    l_crop = korn.RandomResizedCrop((16, 16))
+    out = [g_crop(x), g_crop(x)] + [l_crop(x) for _ in range(n)]
+    return out
 
 
 """
