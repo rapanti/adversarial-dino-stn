@@ -39,7 +39,7 @@ from torchvision.transforms import InterpolationMode
 from torch.utils.tensorboard import SummaryWriter
 import matplotlib
 import matplotlib.pyplot as plt
-import kornia.augmentation as korn
+import kornia.augmentation as k
 
 
 def load_stn_pretrained_weights(model, pretrained_weights):
@@ -880,36 +880,33 @@ def build_transform(args):
 class ColorAugmentation(object):
     def __init__(self, dataset):
         if dataset == "CIFAR10":
-            normalize = transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+            normalize = k.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])
         elif dataset == "ImageNet":
-            normalize = transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+            normalize = k.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
         else:
-            normalize = transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+            normalize = k.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
 
-        color_jitter = transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1)
-        gaussian_blur = transforms.GaussianBlur(3, (0.1, 2.0))
-
-        self.transform_global1 = transforms.Compose([
-            transforms.RandomApply([color_jitter], p=0.8),
-            transforms.RandomGrayscale(p=0.2),
-            transforms.RandomApply([gaussian_blur], p=1.0),
+        self.transform_global1 = k.AugmentationSequential(
+            k.ColorJiggle(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1, p=0.8),
+            k.RandomGrayscale(p=0.2),
+            k.RandomGaussianBlur((3, 3), (0.1, 2.0), p=1),
             normalize,
-        ])
+        )
 
-        self.transform_global2 = transforms.Compose([
-            transforms.RandomApply([color_jitter], p=0.8),
-            transforms.RandomGrayscale(p=0.2),
-            transforms.RandomApply([gaussian_blur], p=0.1),
-            transforms.RandomSolarize(0.5, p=0.2),
+        self.transform_global2 = k.AugmentationSequential(
+            k.ColorJiggle(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1, p=0.8),
+            k.RandomGrayscale(p=0.2),
+            k.RandomGaussianBlur((3, 3), (0.1, 2.0), p=0.1),
+            k.RandomSolarize(0.5, p=0.2),
             normalize,
-        ])
+        )
 
-        self.transform_local = transforms.Compose([
-            transforms.RandomApply([color_jitter], p=0.8),
-            transforms.RandomGrayscale(p=0.2),
-            transforms.RandomApply([gaussian_blur], p=0.5),
+        self.transform_local = k.AugmentationSequential(
+            k.ColorJiggle(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1, p=0.8),
+            k.RandomGrayscale(p=0.2),
+            k.RandomGaussianBlur((3, 3), (0.1, 2.0), p=0.5),
             normalize,
-        ])
+        )
 
     def __call__(self, images):
         crops = [self.transform_global1(images[0]), self.transform_global2(images[1])]
@@ -1017,8 +1014,8 @@ def theta_heatmap(theta, epoch):
 
 
 def random_crop(x, n):
-    g_crop = korn.RandomResizedCrop((32, 32))
-    l_crop = korn.RandomResizedCrop((16, 16))
+    g_crop = k.RandomResizedCrop((32, 32))
+    l_crop = k.RandomResizedCrop((16, 16))
     out = [g_crop(x), g_crop(x)] + [l_crop(x) for _ in range(n)]
     return out
 
