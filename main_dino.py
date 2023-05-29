@@ -19,21 +19,20 @@ import time
 import json
 from pathlib import Path
 
+import einops
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.distributed as dist
 import torch.backends.cudnn as cudnn
 import torch.nn.functional as F
+import torchvision.utils
 from torch.utils.data import DistributedSampler, DataLoader
-import kornia.augmentation as K
-from kornia.geometry.transform import resize
+from torchvision import transforms, datasets
 
 import utils
 import vision_transformer as vits
 from vision_transformer import DINOHead
-
-from diff_patch_selection.patchnet import PatchNet
 
 
 def train_dino(args):
@@ -47,12 +46,33 @@ def train_dino(args):
         json.dump(args.__dict__, f, indent=2, sort_keys=True)
 
     # ============ preparing data ... ============
-    dataset = utils.build_dataset(True, args)
+    transform = utils.KorniaDataAugmentationDINO(
+        args.global_crops_scale,
+        args.local_crops_scale,
+        args.local_crops_number,
+        args,
+    )
+    dataset = utils.build_dataset(True, args, transform)
     sampler = DistributedSampler(dataset, shuffle=True)
     data_loader = DataLoader(
         dataset,
         sampler=sampler,
         batch_size=args.batch_size_per_gpu,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        drop_last=True,
+    )
+
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+    ])
+    dataset = datasets.CIFAR10(args.data_path, train=True, transform=transform)
+    sampler = DistributedSampler(dataset, shuffle=True)
+    a_loader = DataLoader(
+        dataset,
+        sampler=sampler,
+        batch_size=1,
         num_workers=args.num_workers,
         pin_memory=True,
         drop_last=True,
@@ -74,16 +94,6 @@ def train_dino(args):
     else:
         print(f"Unknown architecture: {args.arch}")
 
-    patch_net = PatchNet(
-        patch_size=args.pnet_patch_size,
-        k=args.local_crops_number,
-        use_scorer_se=args.use_scorer_se,
-        selection_method=args.selection_method,
-        normalization_str=args.normalization_str,
-        hard_topk_probability=0.,
-        random_patch_probability=0.,
-    )
-
     # multi-crop wrapper handles forward with inputs of different resolutions
     student = utils.MultiCropWrapper(student, DINOHead(
         embed_dim,
@@ -96,7 +106,7 @@ def train_dino(args):
         DINOHead(embed_dim, args.out_dim, args.use_bn_in_head),
     )
     # move networks to gpu
-    student, teacher, patch_net = student.cuda(), teacher.cuda(), patch_net.cuda()
+    student, teacher = student.cuda(), teacher.cuda()
 
     # synchronize batch norms (if any)
     if utils.has_batchnorms(student):
@@ -109,11 +119,8 @@ def train_dino(args):
     else:
         # teacher_without_ddp and teacher are the same thing
         teacher_without_ddp = teacher
-    if utils.has_batchnorms(patch_net):
-        patch_net = nn.SyncBatchNorm.convert_sync_batchnorm(patch_net)
 
     student = nn.parallel.DistributedDataParallel(student, device_ids=[args.gpu])
-    patch_net = nn.parallel.DistributedDataParallel(patch_net, device_ids=[args.gpu])
     # teacher and student start with the same weights
     teacher_without_ddp.load_state_dict(student.module.state_dict())
     # there is no backpropagation through the teacher, so no need for gradients
@@ -136,13 +143,10 @@ def train_dino(args):
 
     if args.optimizer == "adamw":
         optimizer = torch.optim.AdamW(params_groups)  # to use with ViTs
-        patch_net_optimizer = torch.optim.AdamW(patch_net.parameters())
     elif args.optimizer == "sgd":
         optimizer = torch.optim.SGD(params_groups, lr=0, momentum=0.9)  # lr is set by scheduler
-        patch_net_optimizer = torch.optim.SGD(patch_net.parameters(), lr=0, momentum=0.9)
     elif args.optimizer == "lars":
         optimizer = utils.LARS(params_groups)  # to use with convnet and large batches
-        patch_net_optimizer = torch.optim.LARS(patch_net.parameters())
     else:
         print(f"Optimizer {args.optimizer} not supported.")
         sys.exit(1)
@@ -153,9 +157,9 @@ def train_dino(args):
         fp16_scaler = torch.cuda.amp.GradScaler()
 
     # ============ init schedulers ... ============
-    args.batch_size = args.batch_size_per_gpu * utils.get_world_size()
+    args.total_batch_size = args.batch_size_per_gpu * utils.get_world_size()
     lr_schedule = utils.cosine_scheduler(
-        args.lr * args.batch_size / 256.,  # linear scaling rule
+        args.lr * args.total_batch_size / 256.,  # linear scaling rule
         args.min_lr,
         args.epochs, len(data_loader),
         warmup_epochs=args.warmup_epochs,
@@ -168,16 +172,7 @@ def train_dino(args):
     # momentum parameter is increased to 1. during training with a cosine schedule
     momentum_schedule = utils.cosine_scheduler(args.momentum_teacher, 1, args.epochs, len(data_loader))
 
-    patch_net_lr_schedule = utils.cosine_scheduler(
-        args.lr * args.batch_size / 256.,  # linear scaling rule
-        args.min_lr,
-        args.epochs, len(data_loader),
-        warmup_epochs=args.warmup_epochs,
-    )
     print(f"Loss, optimizer and schedulers ready.")
-
-    # ============ ColorAugments after STN ============
-    color_augment = utils.ColorAugmentation(args.dataset) if args.color_augment else None
 
     # ============ optionally resume training ... ============
     to_restore = {"epoch": 0}
@@ -189,8 +184,6 @@ def train_dino(args):
         optimizer=optimizer,
         fp16_scaler=fp16_scaler,
         dino_loss=dino_loss,
-        patch_net=patch_net,
-        patch_net_optimizer=patch_net_optimizer,
     )
     start_epoch = to_restore["epoch"]
 
@@ -207,8 +200,10 @@ def train_dino(args):
         # ============ training one epoch of DINO ... ============
         train_stats = train_one_epoch(student, teacher, teacher_without_ddp, dino_loss,
                                       data_loader, optimizer, lr_schedule, wd_schedule, momentum_schedule,
-                                      epoch, fp16_scaler, args, summary_writer,
-                                      patch_net, patch_net_optimizer, patch_net_lr_schedule, color_augment)
+                                      epoch, fp16_scaler, args, summary_writer,)
+
+        # ============ analyze crops ... ============
+        analyze(student, teacher, a_loader, summary_writer, epoch, args)
 
         # ============ writing logs ... ============
         save_dict = {
@@ -218,10 +213,7 @@ def train_dino(args):
             'epoch': epoch + 1,
             'args': args,
             'dino_loss': dino_loss.state_dict(),
-            'patch_net': patch_net.state_dict(),
         }
-        if patch_net_optimizer:
-            save_dict['patch_net_optimizer'] = patch_net_optimizer.state_dict()
         if fp16_scaler is not None:
             save_dict['fp16_scaler'] = fp16_scaler.state_dict()
         utils.save_on_master(save_dict, os.path.join(args.output_dir, 'checkpoint.pth'))
@@ -238,9 +230,9 @@ def train_dino(args):
 
 def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loader,
                     optimizer, lr_schedule, wd_schedule, momentum_schedule,
-                    epoch, fp16_scaler, args, summary_writer,
-                    patch_net, patch_net_optimizer, patch_net_lr_schedule, color_augment):
-    rcrop = K.RandomResizedCrop((32, 32), args.global_crops_scale)
+                    epoch, fp16_scaler, args, summary_writer,):
+    print("STARTING MAIN-DINO")
+    print("========================================")
     metric_logger = utils.MetricLogger(delimiter=" ")
     header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
     for it, (images, _) in enumerate(metric_logger.log_every(data_loader, 10, header)):
@@ -251,31 +243,19 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
             if i == 0:  # only the first group is regularized
                 param_group["weight_decay"] = wd_schedule[it]
 
-        for i, param_group in enumerate(patch_net_optimizer.param_groups):
-            param_group["lr"] = patch_net_lr_schedule[it]
-
         # move images to gpu
         if isinstance(images, list):
             images = [im.cuda(non_blocking=True) for im in images]
         else:
             images = images.cuda(non_blocking=True)
 
+        if utils.is_main_process() and args.summary_writer_freq and it % args.summary_writer_freq == 0:
+            summary_writer.write_image_grid("images", images=images, original_images=images,
+                                            epoch=epoch, global_step=it)
         # teacher and student forward passes + compute dino loss
         with torch.cuda.amp.autocast(fp16_scaler is not None):
-            out = patch_net(images)
-            out = [patch.squeeze() for patch in out]
-
-            patches = [resize(out[0], 32), resize(out[1], 32)] + [resize(o, 16) for o in out[2:]]
-
-            if utils.is_main_process() and args.summary_writer_freq and it % args.summary_writer_freq == 0:
-                summary_writer.write_image_grid("images", images=patches, original_images=images,
-                                                epoch=epoch, global_step=it)
-
-            if color_augment:
-                patches = color_augment(patches)
-
-            teacher_output = teacher(patches[:2])  # only the global view passes through the teacher
-            student_output = student(patches)
+            teacher_output = teacher(images[:2])  # only the global view passes through the teacher
+            student_output = student(images)
             loss = dino_loss(student_output, teacher_output, epoch)
 
         if not loss.isfinite().all():
@@ -284,26 +264,20 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
 
         # student update
         optimizer.zero_grad()
-        patch_net_optimizer.zero_grad()
         param_norms = None
         if fp16_scaler is None:
             loss.backward()
             if args.clip_grad:
-                torch.nn.utils.clip_grad_norm_(student.parameters(), args.clip_grad)
-                param_norms = torch.nn.utils.clip_grad_norm_(patch_net.parameters(), args.clip_grad)
+                param_norms = torch.nn.utils.clip_grad_norm_(student.parameters(), args.clip_grad)
             utils.cancel_gradients_last_layer(epoch, student, args.freeze_last_layer)
             optimizer.step()
-            patch_net_optimizer.step()
         else:
             fp16_scaler.scale(loss).backward()
             if args.clip_grad:
                 fp16_scaler.unscale_(optimizer)  # unscale the gradients of optimizer's assigned params in-place
-                torch.nn.utils.clip_grad_norm_(student.parameters(), args.clip_grad)
-                fp16_scaler.unscale_(patch_net_optimizer)
-                param_norms = torch.nn.utils.clip_grad_norm_(patch_net.parameters(), args.clip_grad)
+                param_norms = torch.nn.utils.clip_grad_norm_(student.parameters(), args.clip_grad)
             utils.cancel_gradients_last_layer(epoch, student, args.freeze_last_layer)
             fp16_scaler.step(optimizer)
-            fp16_scaler.step(patch_net_optimizer)
             fp16_scaler.update()
 
         # EMA update for the teacher
@@ -324,16 +298,52 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
             summary_writer.add_scalar(tag="lr", scalar_value=optimizer.param_groups[0]["lr"], global_step=it)
             summary_writer.add_scalar(tag="weight decay", scalar_value=optimizer.param_groups[0]["weight_decay"],
                                       global_step=it)
-            summary_writer.add_scalar(tag="grad norm (patch_net)", scalar_value=param_norms, global_step=it)
-
-        # Print gradients to STDOUT
-        if utils.is_main_process() and args.grad_check_freq and it % args.grad_check_freq == 1:
-            utils.print_gradients(patch_net)
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+
+
+def analyze(student, teacher, loader, summary, epoch, args):
+    metric_logger = utils.MetricLogger(delimiter=" ")
+    header = 'ANALYZE'
+    for it, (images, _) in enumerate(metric_logger.log_every(loader, 1000, header)):
+        it = len(loader) * epoch + it
+        if it % 1000:
+            continue
+        b, c, h, w = images.shape
+        images = images.cuda(non_blocking=True)
+        student_outputs = list()
+        with torch.no_grad():
+            teacher_output = teacher(images)
+            for k, s, p in [(4, 1, 0), (4, 2, 0), (4, 4, 0), (8, 1, 0), (8, 4, 0), (8, 8, 0)]:
+                tmp = F.unfold(images, k, stride=s, padding=p)
+                crops = einops.rearrange(tmp, "b (c h w) a -> (b a) c h w", c=c, h=k, w=k)
+                student_outputs.append((k, student(crops)))
+
+        inter = list()
+        for k, out in student_outputs:
+            bs = out.size(0)
+            n = bs // b
+            tmp = teacher_output.repeat(1, n)
+            tmp = einops.rearrange(tmp, "b (n d) -> (b n) d", n=n)
+
+            h = w = int(n ** 0.5)
+            loss = F.cosine_similarity(out, tmp, dim=-1)
+            loss = einops.rearrange(loss, "(b h w) -> b h w", b=b, h=h, w=w)
+            loss = loss.unsqueeze(0)  # loss.mean(dim=0, keepdim=True).unsqueeze(0)
+            # if batch_size > 0:
+            # dist.all_reduce(loss)
+            # loss /= utils.get_world_size()
+
+            loss = F.interpolate(loss, 32, mode="bilinear").repeat(1, 3, 1, 1)
+            inter.append(loss)
+
+        tmp = torch.cat([images] + inter)
+        grid = torchvision.utils.make_grid(tmp)
+        if summary:
+            summary.add_image(f"loss:[4, 4, 4, 8, 8, 8]", grid, global_step=it//1000)
 
 
 class DINOLoss(nn.Module):
@@ -480,24 +490,6 @@ def get_args_parser():
     parser.add_argument("--dist_url", default="env://", type=str, help="""url used to set up
         distributed training; see https://pytorch.org/docs/stable/distributed.html""")
     parser.add_argument("--local_rank", default=0, type=int, help="Please ignore and do not set this argument.")
-    parser.add_argument("--resize_all_inputs", default=False, type=utils.bool_flag,
-                        help="Whether or not to resize all images to one size")
-    parser.add_argument("--color_augment", default=False, type=utils.bool_flag,
-                        help="Whether or not to use color augmentations")
-
-    # PatchNet parameters
-    parser.add_argument("--selection_method", default="perturbed-topk", type=str,
-                        choices=["random", "hard-topk", "topk", "perturbed-topk"],
-                        help="Whether or not to use color augmentations")
-    parser.add_argument("--pnet_patch_size", default=16, type=int, help="Size of the patches from the images.")
-    parser.add_argument("--use_scorer_se", default=False, type=utils.bool_flag,
-                        help="Whether or not to use SqueezeExciteLayer in ScorerNet.")
-    parser.add_argument("--normalization_str", default="identity", type=str,
-                        help="""String specifying the normalization of the scores.""")
-    parser.add_argument("--invert_gradients", default=False, type=utils.bool_flag)
-    parser.add_argument("--hard_topk_probability", default=0, type=float)
-    parser.add_argument("--random_patch_probability", default=0, type=float)
-
 
     # Misc
     parser.add_argument("--plot_size", default=8, type=int, help="The number of different images to plot.")

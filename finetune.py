@@ -40,13 +40,12 @@ def finetune(args, dist_initiated=False):
         json.dump(args.__dict__, f, indent=2, sort_keys=True)
 
     # infer per gpu batch size
-    batch_size_per_gpu = int(args.batch_size / args.world_size)
     # ============ preparing data ... ============
     dataset_val, args.num_classes = build_dataset(is_train=False, args=args)
     sampler = torch.utils.data.SequentialSampler(dataset_val)
     val_loader = torch.utils.data.DataLoader(
         dataset_val, sampler=sampler,
-        batch_size=batch_size_per_gpu,
+        batch_size=args.batch_size_per_gpu,
         num_workers=args.num_workers,
         pin_memory=True,
         drop_last=False
@@ -56,7 +55,7 @@ def finetune(args, dist_initiated=False):
     train_loader = torch.utils.data.DataLoader(
         dataset_train,
         sampler=sampler,
-        batch_size=batch_size_per_gpu,
+        batch_size=args.batch_size_per_gpu,
         num_workers=args.num_workers,
         pin_memory=True,
     )
@@ -87,17 +86,18 @@ def finetune(args, dist_initiated=False):
     model = nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
 
     # set optimizer
+    args.total_batch_size = int(args.total_batch_size * args.world_size)
     if args.optimizer == "sgd":
         optimizer = torch.optim.SGD(
             model.parameters(),
-            args.lr * args.batch_size / 768.,
+            args.lr * args.total_batch_size / 768.,
             momentum=args.momentum,
             weight_decay=args.weight_decay,
         )
     elif args.optimizer == "adamw":
         optimizer = torch.optim.AdamW(
             model.parameters(),
-            args.lr * args.batch_size / 768.,
+            args.lr * args.total_batch_size / 768.,
             weight_decay=args.weight_decay,
         )
     else:

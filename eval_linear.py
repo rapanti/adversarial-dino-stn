@@ -65,14 +65,12 @@ def eval_linear(args, dist_inited=False):
     utils.load_pretrained_weights(model, args.pretrained_weights, args.checkpoint_key, args.arch, args.patch_size)
     print(f"Model {args.arch} built.")
 
-    # infer per gpu batch size
-    batch_size_per_gpu = int(args.batch_size / args.world_size)
     # ============ preparing data ... ============
     dataset_val, args.num_labels = build_dataset(is_train=False, args=args)
     sampler = torch.utils.data.SequentialSampler(dataset_val)
     val_loader = torch.utils.data.DataLoader(
         dataset_val, sampler=sampler,
-        batch_size=batch_size_per_gpu,
+        batch_size=args.batch_size_per_gpu,
         num_workers=args.num_workers,
         pin_memory=True,
         drop_last=False
@@ -87,16 +85,17 @@ def eval_linear(args, dist_inited=False):
     train_loader = torch.utils.data.DataLoader(
         dataset_train,
         sampler=sampler,
-        batch_size=batch_size_per_gpu,
+        batch_size=args.batch_size_per_gpu,
         num_workers=args.num_workers,
         pin_memory=True,
     )
     print(f"Data loaded with {len(dataset_train)} train and {len(dataset_val)} val imgs.")
 
     # set optimizer
+    args.total_batch_size = int(args.total_batch_size * args.world_size)
     optimizer = torch.optim.SGD(
         linear_classifier.parameters(),
-        args.lr * args.batch_size / 768.,  # linear scaling rule
+        args.lr * args.total_batch_size / 768.,  # linear scaling rule
         momentum=args.momentum,
         weight_decay=args.weight_decay,  # we do not apply weight decay
     )

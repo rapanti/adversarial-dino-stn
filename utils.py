@@ -39,6 +39,7 @@ from torch.utils.tensorboard import SummaryWriter
 from PIL import ImageFilter, ImageOps
 import matplotlib
 import matplotlib.pyplot as plt
+import kornia
 import kornia.augmentation as k
 
 
@@ -376,6 +377,7 @@ def get_sha():
 
     def _run(command):
         return subprocess.check_output(command, cwd=cwd).decode('ascii').strip()
+
     sha = 'N/A'
     diff = "clean"
     branch = 'N/A'
@@ -525,6 +527,7 @@ class LARS(torch.optim.Optimizer):
     """
     Almost copy-paste from https://github.com/facebookresearch/barlowtwins/blob/main/main.py
     """
+
     def __init__(self, params, lr=0, weight_decay=0, momentum=0.9, eta=0.001,
                  weight_decay_filter=None, lars_adaptation_filter=None):
         defaults = dict(lr=lr, weight_decay=weight_decay, momentum=momentum,
@@ -571,6 +574,7 @@ class MultiCropWrapper(nn.Module):
     concatenate all the output features and run the head forward on these
     concatenated features.
     """
+
     def __init__(self, backbone, head):
         super(MultiCropWrapper, self).__init__()
         # disable layers dedicated to ImageNet labels classification
@@ -626,6 +630,7 @@ class PCA():
     """
     Class to  compute and apply PCA.
     """
+
     def __init__(self, dim=256, whit=0.5):
         self.dim = dim
         self.whit = whit
@@ -652,7 +657,7 @@ class PCA():
         print("keeping %.2f %% of the energy" % (d.sum() / totenergy * 100.0))
 
         # for the whitening
-        d = np.diag(1. / d**self.whit)
+        d = np.diag(1. / d ** self.whit)
 
         # principal components
         self.dvt = np.dot(d, v.T)
@@ -727,7 +732,7 @@ def compute_map(ranks, gnd, kappas=[]):
     """
 
     map = 0.
-    nq = len(gnd) # number of queries
+    nq = len(gnd)  # number of queries
     aps = np.zeros(nq)
     pr = np.zeros(len(kappas))
     prs = np.zeros((nq, len(kappas)))
@@ -749,8 +754,8 @@ def compute_map(ranks, gnd, kappas=[]):
             qgndj = np.empty(0)
 
         # sorted positions of positive and junk images (0 based)
-        pos  = np.arange(ranks.shape[0])[np.in1d(ranks[:,i], qgnd)]
-        junk = np.arange(ranks.shape[0])[np.in1d(ranks[:,i], qgndj)]
+        pos = np.arange(ranks.shape[0])[np.in1d(ranks[:, i], qgnd)]
+        junk = np.arange(ranks.shape[0])[np.in1d(ranks[:, i], qgndj)]
 
         k = 0;
         ij = 0;
@@ -771,9 +776,9 @@ def compute_map(ranks, gnd, kappas=[]):
         aps[i] = ap
 
         # compute precision @ k
-        pos += 1 # get it to 1-based
+        pos += 1  # get it to 1-based
         for j in np.arange(len(kappas)):
-            kq = min(max(pos), kappas[j]); 
+            kq = min(max(pos), kappas[j]);
             prs[i, j] = (pos <= kq).sum() / kq
         pr = pr + prs[i, :]
 
@@ -785,7 +790,7 @@ def compute_map(ranks, gnd, kappas=[]):
 
 def multi_scale(samples, model):
     v = None
-    for s in [1, 1/2**(1/2), 1/2]:  # we use 3 different scales
+    for s in [1, 1 / 2 ** (1 / 2), 1 / 2]:  # we use 3 different scales
         if s == 1:
             inp = samples.clone()
         else:
@@ -836,8 +841,8 @@ def grad_rescale(x, scale=1.0):
     return GradientRescale.apply(x)
 
 
-def build_dataset(is_train, args):
-    transform = build_transform(args)
+def build_dataset(is_train, args, use_transform=None):
+    transform = build_transform(args) if use_transform is None else use_transform
     if args.dataset == 'CIFAR10':
         return datasets.CIFAR10(args.data_path, download=True, train=is_train, transform=transform)
     if args.dataset == 'CIFAR100':
@@ -884,7 +889,7 @@ class ColorAugmentation(object):
         elif dataset == "ImageNet":
             normalize = k.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
         else:
-            normalize = k.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
+            normalize = k.Normalize(torch.zeros(3), torch.ones(3))
 
         self.transform_global1 = k.AugmentationSequential(
             k.ColorJiggle(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1, p=0.8),
@@ -956,7 +961,8 @@ def summary_writer_write_images_thetas(summary_writer, stn_images, images, theta
     theta_g2 = thetas[1][0].cpu().detach().numpy()
     theta_l1 = thetas[2][0].cpu().detach().numpy()
     theta_l2 = thetas[3][0].cpu().detach().numpy()
-    summary_writer.write_image_grid(tag="images", images=stn_images, original_images=images, epoch=epoch, global_step=it)
+    summary_writer.write_image_grid(tag="images", images=stn_images, original_images=images, epoch=epoch,
+                                    global_step=it)
     summary_writer.write_theta_heatmap(tag="theta_g1", theta=theta_g1, epoch=epoch, global_step=it)
     summary_writer.write_theta_heatmap(tag="theta_g2", theta=theta_g2, epoch=epoch, global_step=it)
     summary_writer.write_theta_heatmap(tag="theta_l1", theta=theta_l1, epoch=epoch, global_step=it)
@@ -972,7 +978,7 @@ def image_grid(images, original_images, epoch, plot_size=16):
     figure = plt.figure(figsize=(x, num_images))
     plt.subplots_adjust(hspace=0.5)
 
-    titles = [f"orig@{epoch}"] + [f"patch {n+1}" for n in range(len(images))]
+    titles = [f"orig@{epoch}"] + [f"patch {n + 1}" for n in range(len(images))]
     total = 0
     for i in range(num_images):  # orig_img in enumerate(original_images, 1):
         all_images = [original_images[i]] + [img[i] for img in images]
@@ -1010,6 +1016,7 @@ class GaussianBlur(object):
     """
     Apply Gaussian Blur to the PIL image.
     """
+
     def __init__(self, p=0.5, radius_min=0.1, radius_max=2.):
         self.prob = p
         self.radius_min = radius_min
@@ -1031,6 +1038,7 @@ class Solarization(object):
     """
     Apply Solarization to the PIL image.
     """
+
     def __init__(self, p):
         self.p = p
 
@@ -1042,7 +1050,7 @@ class Solarization(object):
 
 
 class DataAugmentationDINO(object):
-    def __init__(self, global_crops_scale, local_crops_scale, local_crops_number):
+    def __init__(self, global_crops_scale, local_crops_scale, local_crops_number, args):
         flip_and_color_jitter = transforms.Compose([
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.RandomApply(
@@ -1057,33 +1065,88 @@ class DataAugmentationDINO(object):
         ])
 
         # first global crop
-        self.global_transfo1 = transforms.Compose([
-            transforms.RandomResizedCrop(224, scale=global_crops_scale, interpolation=InterpolationMode.BICUBIC),
+        self.global_transform1 = transforms.Compose([
+            transforms.RandomResizedCrop(
+                args.img_size, scale=global_crops_scale, interpolation=InterpolationMode.BILINEAR),
             flip_and_color_jitter,
-            GaussianBlur(1.0),
+            transforms.GaussianBlur(3, (0.1, 2.0)),
             normalize,
         ])
         # second global crop
-        self.global_transfo2 = transforms.Compose([
-            transforms.RandomResizedCrop(224, scale=global_crops_scale, interpolation=InterpolationMode.BICUBIC),
+        self.global_transform2 = transforms.Compose([
+            transforms.RandomResizedCrop(
+                args.img_size, scale=global_crops_scale),
             flip_and_color_jitter,
-            GaussianBlur(0.1),
-            Solarization(0.2),
+            transforms.RandomApply([transforms.GaussianBlur(3, (0.1, 2.0))], p=0.1),
+            transforms.RandomSolarize(0.5, p=0.2),
             normalize,
         ])
         # transformation for the local small crops
+        self.local_size = int(((96 / 224) * args.img_size // args.patch_size) * args.patch_size)
         self.local_crops_number = local_crops_number
-        self.local_transfo = transforms.Compose([
-            transforms.RandomResizedCrop(96, scale=local_crops_scale, interpolation=InterpolationMode.BICUBIC),
+        self.local_transform = transforms.Compose([
+            transforms.RandomResizedCrop(self.local_size, scale=local_crops_scale, ),
             flip_and_color_jitter,
-            GaussianBlur(p=0.5),
+            transforms.RandomApply([transforms.GaussianBlur(3, (0.1, 2.0))], p=0.5),
             normalize,
         ])
 
     def __call__(self, image):
-        crops = [self.global_transfo1(image), self.global_transfo2(image)]
+        crops = [self.global_transform1(image), self.global_transform2(image)]
         for _ in range(self.local_crops_number):
-            crops.append(self.local_transfo(image))
+            crops.append(self.local_transform(image))
+        return crops
+
+
+class KorniaDataAugmentationDINO(object):
+    def __init__(self, global_crops_scale, local_crops_scale, local_crops_number, args):
+        match args.dataset:
+            case "CIFAR10":
+                normalize = k.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010], keepdim=True)
+                res0, res1 = 32, 16
+            case "ImageNet":
+                normalize = k.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225], keepdim=True)
+                res0, res1 = 224, 96
+            case _:
+                normalize = k.Normalize(torch.zeros(3), torch.ones(3), keepdim=True)
+                res0, res1 = 224, 96
+        flip_color_jitter = k.AugmentationSequential(
+            k.RandomHorizontalFlip(0.5, keepdim=True),
+            k.ColorJiggle(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1, p=0.8, keepdim=True),
+            k.RandomGrayscale(p=0.2, keepdim=True),
+            keepdim=True,
+        )
+        self.transform_global1 = k.AugmentationSequential(
+            flip_color_jitter,
+            k.RandomResizedCrop((res0, res0), global_crops_scale, keepdim=True),
+            k.RandomGaussianBlur((3, 3), (0.1, 2.0), p=1, keepdim=True),
+            normalize,
+            keepdim=True,
+        )
+        self.transform_global2 = k.AugmentationSequential(
+            flip_color_jitter,
+            k.RandomResizedCrop((res0, res0), global_crops_scale, keepdim=True),
+            k.RandomGaussianBlur((3, 3), (0.1, 2.0), p=0.1, keepdim=True),
+            k.RandomSolarize(0.5, p=0.2, keepdim=True),
+            normalize,
+            keepdim=True,
+        )
+        self.local_crops_number = local_crops_number
+        self.transform_local = k.AugmentationSequential(
+            flip_color_jitter,
+            k.RandomResizedCrop((res1, res1), local_crops_scale, keepdim=True),
+            k.RandomGaussianBlur((3, 3), (0.1, 2.0), p=0.5, keepdim=True),
+            normalize,
+            keepdim=True,
+        )
+
+    def __call__(self, x):
+        x_tmp = np.array(x)  # HxWxC
+        x_tmp = kornia.image_to_tensor(x_tmp)  # CxHxW
+        img = x_tmp / 255.0
+        crops = [self.transform_global1(img), self.transform_global2(img)]
+        for _ in range(self.local_crops_number):
+            crops.append(self.transform_local(img))
         return crops
 
 
